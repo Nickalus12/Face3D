@@ -90,16 +90,17 @@ splatting:
   initialization: "flame_mesh"  # "flame_mesh", "pointcloud", "colmap_sparse"
   num_surface_samples: 200000  # Points to sample from FLAME mesh
   training:
-    iterations: 7000  # Good quality, ~3-5 min on RTX 3080
-    max_num_gaussians: 500000  # Hard cap for 16GB VRAM
-    grow_grad2d: 0.0005  # Higher = fewer new Gaussians = less VRAM
-    refine_stop_iter: 5000  # Stop growing early
-    refine_every: 200  # Densify less often
-    checkpoint_interval: 2000
+    iterations: 3000  # Optimized: 3K with dense init + progressive res + staged loss
+    max_num_gaussians: 300000  # Reduced from 500K — faster training
+    grow_grad2d: 0.0005
+    refine_stop_iter: 1800  # 60% of iterations
+    refine_every: 500  # Less frequent densification
+    checkpoint_interval: 1000
     eval_interval: 500
   export:
     mesh_voxel_size: 0.005
-    turntable_views: 60
+    turntable_views: 30  # Reduced from 60 for faster export
+    texture_resolution: 2048  # Reduced from 4096 — faster baking
     render_resolution: [1920, 1080]
 
 # Photo settings (Expert RAW / additional high-quality photos)

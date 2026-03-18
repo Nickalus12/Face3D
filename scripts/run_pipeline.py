@@ -80,7 +80,8 @@ def validate_config(config: dict, video_paths: list[Path]):
                 errors.append("Config specifies device='cuda' but CUDA is not available")
             else:
                 gpu_name = torch.cuda.get_device_name(0)
-                gpu_mem = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+                props = torch.cuda.get_device_properties(0)
+                gpu_mem = getattr(props, 'total_memory', getattr(props, 'total_mem', 0)) / (1024**3)
                 log.info("GPU: %s (%.1f GB)", gpu_name, gpu_mem)
         except ImportError:
             errors.append("PyTorch not installed; cannot use CUDA device")
@@ -955,6 +956,19 @@ def stage_12_init_gaussians(config: dict, session: dict) -> bool:
             colmap_model_dir=session["proc_dir"] / "colmap" / "sparse" / "0",
         )
 
+    # Downsample if exceeding max_num_gaussians to avoid OOM during training
+    max_gs = splat_cfg.get("training", {}).get("max_num_gaussians", 500000)
+    n_gs = len(gaussians.positions)
+    if n_gs > max_gs:
+        log.info("Downsampling %d Gaussians to %d (max_num_gaussians cap)", n_gs, max_gs)
+        import torch as _torch
+        indices = _torch.randperm(n_gs)[:max_gs]
+        gaussians.positions = gaussians.positions[indices]
+        gaussians.colors_sh = gaussians.colors_sh[indices]
+        gaussians.scales = gaussians.scales[indices]
+        gaussians.rotations = gaussians.rotations[indices]
+        gaussians.opacities = gaussians.opacities[indices]
+
     save_dict = {
         "positions": gaussians.positions,
         "colors_sh": gaussians.colors_sh,
@@ -1090,9 +1104,17 @@ def stage_14_export(config: dict, session: dict) -> bool:
 
     export_cfg = config["splatting"]["export"]
     out_dir = session["out_dir"]
-    ckpt_path = out_dir / "checkpoints" / "final.pt"
+    # Trainer saves checkpoints directly in out_dir, not in checkpoints/
+    ckpt_path = out_dir / "final.pt"
+    if not ckpt_path.exists():
+        ckpt_path = out_dir / "checkpoints" / "final.pt"
+    if not ckpt_path.exists():
+        ckpt_path = out_dir / "best.pt"
+    if not ckpt_path.exists():
+        log.error("No checkpoint found in %s", out_dir)
+        return False
 
-    state = torch.load(str(ckpt_path), map_location="cpu", weights_only=True)
+    state = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
     sh_all = torch.cat([state["sh0"], state["shN"]], dim=1)
     gaussians = GaussianModel(
         positions=state["means"],
