@@ -6,6 +6,9 @@ plus lens metadata parsing for multi-lens grouping.
 Includes hardware-accelerated decoding (NVIDIA CUDA), ffmpeg-native frame
 selection filters, ffprobe-based EXIF/focal-length extraction, and adaptive
 motion thresholds calibrated from initial optical flow statistics.
+
+Also provides LOG profile detection via video metadata so that downstream
+colour correction can be skipped for non-LOG footage.
 """
 
 from __future__ import annotations
@@ -191,6 +194,67 @@ def _detect_lens_from_video_metadata(video_path: Path) -> Optional[str]:
     return None
 
 
+def detect_log_profile(video_path: str | Path) -> Optional[str]:
+    """Detect whether a video was recorded with a LOG color profile.
+
+    Inspects video-level and stream-level metadata tags for Samsung LOG
+    indicators (e.g. ``com.samsung.android.capture.colorSpace``,
+    ``ColorSpace``, filename hints).
+
+    Returns:
+        The LOG profile name (e.g. ``"slog3"``) if detected, or ``None``
+        when the video appears to use a standard (Rec.709 / sRGB) profile.
+    """
+    video_path = Path(video_path)
+
+    # Quick filename heuristic (often Samsung LOG files contain "LOG" in name)
+    if "log" in video_path.stem.lower():
+        logger.info("LOG profile detected via filename hint: %s", video_path.name)
+        return "slog3"
+
+    try:
+        probe = _probe_video(video_path)
+    except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError):
+        return None
+
+    # Collect all tag dictionaries from format + streams
+    tag_dicts: list[dict] = []
+    tag_dicts.append(probe.get("format", {}).get("tags", {}))
+    for stream in probe.get("streams", []):
+        tag_dicts.append(stream.get("tags", {}))
+        for sd in stream.get("side_data_list", []):
+            if isinstance(sd, dict):
+                tag_dicts.append(sd)
+
+    # Samsung-specific LOG indicators
+    log_keys = [
+        "com.samsung.android.capture.colorSpace",
+        "com.samsung.android.sceneMode",
+        "com.android.capture.colorSpace",
+        "ColorSpace",
+        "color_space",
+    ]
+
+    log_indicators = {"log", "slog", "slog3", "s-log3", "hlg", "flat", "cine"}
+
+    for key in log_keys:
+        for tags in tag_dicts:
+            value = tags.get(key, "")
+            if isinstance(value, str) and any(ind in value.lower() for ind in log_indicators):
+                logger.info("LOG profile detected via metadata '%s': '%s'", key, value)
+                return "slog3"
+
+    # Check color_transfer / color_trc in stream info
+    for stream in probe.get("streams", []):
+        trc = stream.get("color_transfer", stream.get("color_trc", "")).lower()
+        if any(ind in trc for ind in ("slog", "log", "hlg", "arib-std-b67")):
+            logger.info("LOG profile detected via color_transfer: '%s'", trc)
+            return "slog3"
+
+    logger.info("No LOG profile detected for %s — standard color assumed", video_path.name)
+    return None
+
+
 def _compute_optical_flow_magnitude(prev_gray: np.ndarray, curr_gray: np.ndarray) -> float:
     """Compute mean optical flow magnitude between two grayscale frames."""
     flow = cv2.calcOpticalFlowFarneback(
@@ -298,7 +362,7 @@ def extract_frames(
     video_path: str | Path,
     output_dir: str | Path,
     target_fps: float = 2.0,
-    max_frames: int = 300,
+    max_frames: int = 80,
 ) -> list[Path]:
     """Extract frames from an S25 Ultra H.265/HEVC video at a target FPS.
 
@@ -311,7 +375,7 @@ def extract_frames(
         video_path: Path to the input video file.
         output_dir: Directory where extracted PNG frames will be saved.
         target_fps: Desired extraction rate in frames per second.
-        max_frames: Maximum number of frames to extract.
+        max_frames: Maximum number of frames to extract (default 80).
 
     Returns:
         Sorted list of paths to the extracted PNG frames.
@@ -400,24 +464,31 @@ def extract_frames_motion_based(
     video_path: str | Path,
     output_dir: str | Path,
     min_flow_threshold: float = 2.0,
-    max_frames: int = 300,
+    max_frames: int = 80,
     adaptive_threshold: bool = True,
     calibration_frames: int = 50,
     calibration_multiplier: float = 1.5,
     scene_change_prefill: bool = True,
     scene_threshold: float = 0.1,
+    scene_change_only: bool = True,
 ) -> list[Path]:
     """Extract frames only when sufficient camera motion is detected.
 
     Ideal for face capture sessions where the camera orbits the subject.
-    When *adaptive_threshold* is ``True`` (default), the first
-    *calibration_frames* are used to compute optical flow statistics and
-    the effective threshold is set to ``median_flow * calibration_multiplier``,
-    adapting automatically to different capture speeds.
 
-    An optional two-pass approach is available via *scene_change_prefill*:
-    first, ffmpeg scene-change detection extracts keyframes; then this
-    function fills angular gaps using optical-flow based selection.
+    When *scene_change_only* is ``True`` (default), extraction uses only
+    ffmpeg native scene-change detection, which is ~10x faster than
+    Python optical flow because scene analysis runs during decode.  The
+    optical-flow pass 2 is skipped entirely.
+
+    When *scene_change_only* is ``False``, falls back to the legacy
+    two-pass approach: ffmpeg scene-change keyframes first, then
+    optical-flow gap-filling.
+
+    When *adaptive_threshold* is ``True``, the first *calibration_frames*
+    are used to compute optical flow statistics and the effective threshold
+    is set to ``median_flow * calibration_multiplier``, adapting
+    automatically to different capture speeds.
 
     Args:
         video_path: Path to the input video file.
@@ -425,7 +496,7 @@ def extract_frames_motion_based(
         min_flow_threshold: Minimum mean optical flow magnitude (pixels)
             required to keep a frame. Used as a fallback when adaptive
             calibration produces too few flow samples.
-        max_frames: Maximum number of frames to save.
+        max_frames: Maximum number of frames to save (default 80).
         adaptive_threshold: If ``True``, calibrate the threshold from the
             first *calibration_frames* frames.
         calibration_frames: Number of frames to sample for calibration.
@@ -434,6 +505,8 @@ def extract_frames_motion_based(
             keyframes via ffmpeg before optical-flow selection.
         scene_threshold: Scene change threshold for ffmpeg select filter
             (0.0-1.0). Lower values detect more changes.
+        scene_change_only: If ``True`` (default), skip optical-flow pass
+            entirely and rely only on ffmpeg scene detection for speed.
 
     Returns:
         Sorted list of paths to the saved PNG frames.
@@ -503,6 +576,81 @@ def extract_frames_motion_based(
             if saved_paths:
                 _save_lens_metadata(saved_paths, video_path, output_dir)
             return saved_paths
+
+        # In scene_change_only mode, skip the expensive optical flow pass.
+        # If scene detection yielded too few frames, supplement with uniform
+        # sampling via ffmpeg select filter.
+        if scene_change_only:
+            if scene_frames_saved >= 10:
+                logger.info(
+                    "Scene-change only mode: %d frames extracted, skipping optical flow",
+                    scene_frames_saved,
+                )
+                saved_paths = sorted(output_dir.glob("frame_*.png"))
+                if saved_paths:
+                    _save_lens_metadata(saved_paths, video_path, output_dir)
+                return saved_paths
+            else:
+                # Too few scene changes — fall back to uniform FPS extraction
+                logger.info(
+                    "Scene-change only mode: only %d frames, supplementing with uniform extraction",
+                    scene_frames_saved,
+                )
+                remaining_budget = max_frames - scene_frames_saved
+                probe = _probe_video(video_path)
+                source_fps = _get_fps(probe)
+                duration = _get_duration(probe)
+                supplement_fps = remaining_budget / max(duration, 1.0)
+                supplement_fps = min(supplement_fps, source_fps)
+                frame_step = max(1, round(source_fps / supplement_fps))
+
+                supp_dir = output_dir / "_supplement_pass"
+                supp_dir.mkdir(parents=True, exist_ok=True)
+                supp_pattern = str(supp_dir / "supp_%06d.png")
+
+                hwaccel_flags = _hwaccel_input_flags()
+                cmd = ["ffmpeg", "-y"]
+                cmd.extend(hwaccel_flags)
+                cmd.extend([
+                    "-i", str(video_path),
+                    "-vf", f"select='not(mod(n\\,{frame_step}))'",
+                    "-vsync", "vfr",
+                    "-vframes", str(remaining_budget),
+                    "-pix_fmt", "rgb24",
+                    supp_pattern,
+                ])
+                try:
+                    subprocess.run(cmd, capture_output=True, text=True, check=True)
+                except subprocess.CalledProcessError:
+                    if hwaccel_flags:
+                        cmd_cpu = ["ffmpeg", "-y", "-i", str(video_path)]
+                        cmd_cpu.extend([
+                            "-vf", f"select='not(mod(n\\,{frame_step}))'",
+                            "-vsync", "vfr",
+                            "-vframes", str(remaining_budget),
+                            "-pix_fmt", "rgb24",
+                            supp_pattern,
+                        ])
+                        subprocess.run(cmd_cpu, capture_output=True, text=True, check=True)
+
+                supp_files = sorted(supp_dir.glob("supp_*.png"))
+                for sf in supp_files:
+                    dest = output_dir / f"frame_{scene_frames_saved:06d}.png"
+                    sf.rename(dest)
+                    scene_frames_saved += 1
+                try:
+                    supp_dir.rmdir()
+                except OSError:
+                    pass
+
+                saved_paths = sorted(output_dir.glob("frame_*.png"))
+                if saved_paths:
+                    _save_lens_metadata(saved_paths, video_path, output_dir)
+                logger.info(
+                    "Scene-change + supplement: %d total frames extracted",
+                    len(saved_paths),
+                )
+                return saved_paths
 
     # --- Pass 2: optical-flow based frame selection ---
     cap = cv2.VideoCapture(str(video_path))

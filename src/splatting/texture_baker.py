@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from pathlib import Path
 
 import cv2
@@ -25,6 +26,12 @@ import trimesh
 from splatting.camera_utils import Camera
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of cameras to use for texture baking (sorted by coverage)
+_MAX_BAKE_CAMERAS = 20
+
+# Timeout in seconds for the raycasting-based visibility pass per face batch
+_RAYCAST_TIMEOUT_SEC = 120.0
 
 
 # ---------------------------------------------------------------------------
@@ -37,9 +44,10 @@ def bake_texture(
     cameras: list[Camera],
     images_dir: str | Path,
     output_dir: str | Path,
-    texture_resolution: int = 4096,
+    texture_resolution: int = 2048,
     prefer_photos: bool = True,
     flame_texture_path: str | Path | None = None,
+    max_cameras: int = _MAX_BAKE_CAMERAS,
 ) -> Path | None:
     """Bake a UV texture atlas onto *mesh_path* from multi-view images.
 
@@ -109,17 +117,47 @@ def bake_texture(
     logger.info("UV unwrap complete: %d UV coordinates", len(uv_coords))
 
     # ------------------------------------------------------------------
-    # 3. Build raycasting scene for visibility tests
+    # 3. Select best cameras (limit to max_cameras for performance)
     # ------------------------------------------------------------------
-    mesh_o3d = o3d.t.geometry.TriangleMesh()
-    mesh_o3d.vertex.positions = o3d.core.Tensor(
-        np.asarray(mesh.vertices, dtype=np.float32)
-    )
-    mesh_o3d.triangle.indices = o3d.core.Tensor(
-        np.asarray(mesh.faces, dtype=np.int32)
-    )
-    scene = o3d.t.geometry.RaycastingScene()
-    scene.add_triangles(mesh_o3d)
+    cameras = _select_best_cameras(cameras, mesh, max_cameras)
+    logger.info("Using %d cameras for texture baking", len(cameras))
+
+    # ------------------------------------------------------------------
+    # 4. Build raycasting scene for visibility tests
+    # ------------------------------------------------------------------
+    scene: o3d.t.geometry.RaycastingScene | None = None
+    raycast_available = True
+    try:
+        mesh_o3d = o3d.t.geometry.TriangleMesh()
+        mesh_o3d.vertex.positions = o3d.core.Tensor(
+            np.asarray(mesh.vertices, dtype=np.float32)
+        )
+        mesh_o3d.triangle.indices = o3d.core.Tensor(
+            np.asarray(mesh.faces, dtype=np.int32)
+        )
+        scene = o3d.t.geometry.RaycastingScene()
+        scene.add_triangles(mesh_o3d)
+
+        # Quick sanity check — cast a single ray to see if it returns in time
+        _test_start = time.monotonic()
+        _test_origin = np.asarray(mesh.vertices, dtype=np.float32).mean(axis=0)
+        _test_ray = o3d.core.Tensor(
+            [[*_test_origin, 0.0, 0.0, 1.0]], dtype=o3d.core.Dtype.Float32
+        )
+        scene.cast_rays(_test_ray)
+        _test_elapsed = time.monotonic() - _test_start
+        if _test_elapsed > 5.0:
+            logger.warning(
+                "Raycasting sanity check took %.1fs; disabling visibility "
+                "testing to avoid hanging",
+                _test_elapsed,
+            )
+            scene = None
+            raycast_available = False
+    except Exception as e:
+        logger.warning("Failed to build raycasting scene (%s); skipping visibility", e)
+        scene = None
+        raycast_available = False
 
     # Precompute face normals
     mesh.fix_normals()
@@ -129,7 +167,7 @@ def bake_texture(
         face_normals = np.asarray(mesh.face_normals, dtype=np.float32)
 
     # ------------------------------------------------------------------
-    # 4. Load source images (lazy, keyed by camera uid)
+    # 5. Load source images (lazy, keyed by camera uid)
     # ------------------------------------------------------------------
     cam_images: dict[int, np.ndarray] = {}
 
@@ -156,7 +194,7 @@ def bake_texture(
         return img
 
     # ------------------------------------------------------------------
-    # 5. Rasterise the UV map
+    # 6. Rasterise the UV map
     # ------------------------------------------------------------------
     tex_h = tex_w = texture_resolution
     texture = np.zeros((tex_h, tex_w, 3), dtype=np.float64)
@@ -169,13 +207,27 @@ def bake_texture(
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     faces = np.asarray(mesh.faces, dtype=np.int32)
 
+    n_faces = len(faces)
     logger.info(
-        "Baking %dx%d texture from %d cameras...",
-        tex_w, tex_h, len(cameras),
+        "Baking %dx%d texture from %d cameras across %d faces...",
+        tex_w, tex_h, len(cameras), n_faces,
     )
 
+    bake_start = time.monotonic()
+    raycast_total_time = 0.0
+    raycast_disabled_mid_run = False
+
     # Rasterise each triangle into the texture
-    for fi in range(len(faces)):
+    for fi in range(n_faces):
+        # Progress logging every 10% of faces
+        if fi > 0 and fi % max(1, n_faces // 10) == 0:
+            elapsed = time.monotonic() - bake_start
+            pct = 100.0 * fi / n_faces
+            logger.info(
+                "Texture baking progress: %d/%d faces (%.0f%%) — %.1fs elapsed",
+                fi, n_faces, pct, elapsed,
+            )
+
         tri_uv = face_uvs[fi]  # (3, 2) in [0, 1]
         tri_verts = vertices[faces[fi]]  # (3, 3) world coords
         normal = face_normals[fi]
@@ -211,10 +263,27 @@ def bake_texture(
         # 3D positions of these texels
         pts_3d = bary @ tri_verts  # (M, 3)
 
+        # Disable raycasting mid-run if cumulative raycast time is excessive
+        active_scene = scene
+        if scene is not None and not raycast_disabled_mid_run:
+            if raycast_total_time > _RAYCAST_TIMEOUT_SEC:
+                logger.warning(
+                    "Raycasting cumulative time (%.1fs) exceeded timeout (%.0fs); "
+                    "falling back to nearest-camera projection without occlusion",
+                    raycast_total_time, _RAYCAST_TIMEOUT_SEC,
+                )
+                active_scene = None
+                raycast_disabled_mid_run = True
+
+        # Track raycast time for this batch
+        rc_t0 = time.monotonic()
+
         # Select best view for each texel
         colors, weights = _sample_best_views(
-            pts_3d, normal, cameras, _get_image, scene, prefer_photos,
+            pts_3d, normal, cameras, _get_image, active_scene, prefer_photos,
         )
+
+        raycast_total_time += time.monotonic() - rc_t0
 
         # Write into texture (weighted accumulation for blending at edges)
         for k in range(len(texel_uv_inside)):
@@ -228,13 +297,19 @@ def bake_texture(
                     texture[row, tu] += colors[k] * w
                     weight_map[row, tu] += w
 
+    bake_elapsed = time.monotonic() - bake_start
+    logger.info(
+        "Texture baking rasterisation complete: %.1fs total (%.1fs raycasting)",
+        bake_elapsed, raycast_total_time,
+    )
+
     # Normalise accumulated colours
     valid = weight_map > 0
     texture[valid] /= weight_map[valid, np.newaxis]
     texture = np.clip(texture, 0, 255).astype(np.uint8)
 
     # ------------------------------------------------------------------
-    # 6. Inpaint holes
+    # 7. Inpaint holes
     # ------------------------------------------------------------------
     mask = (~valid).astype(np.uint8) * 255
     texture_bgr = cv2.cvtColor(texture, cv2.COLOR_RGB2BGR)
@@ -242,7 +317,7 @@ def bake_texture(
     texture = cv2.cvtColor(texture_bgr, cv2.COLOR_BGR2RGB)
 
     # ------------------------------------------------------------------
-    # 7. Save outputs
+    # 8. Save outputs
     # ------------------------------------------------------------------
     texture_path = output_dir / "texture.png"
     cv2.imwrite(str(texture_path), cv2.cvtColor(texture, cv2.COLOR_RGB2BGR))
@@ -256,6 +331,104 @@ def bake_texture(
     logger.info("Saved textured mesh to %s", obj_path)
 
     return obj_path
+
+
+# ---------------------------------------------------------------------------
+# Camera selection
+# ---------------------------------------------------------------------------
+
+
+def _select_best_cameras(
+    cameras: list[Camera],
+    mesh: trimesh.Trimesh,
+    max_cameras: int = _MAX_BAKE_CAMERAS,
+) -> list[Camera]:
+    """Select the best *max_cameras* cameras for texture baking.
+
+    Cameras are scored by how well they cover the mesh surface: a
+    combination of the fraction of mesh vertices visible in the image
+    and the average cosine angle between the camera view direction and
+    mesh centroid.  This avoids using all 100+ cameras (which makes the
+    per-texel loop extremely slow) while keeping good angular coverage.
+
+    If *max_cameras* >= len(cameras), all cameras are returned as-is.
+    """
+    if len(cameras) <= max_cameras:
+        return cameras
+
+    centroid = np.asarray(mesh.vertices, dtype=np.float64).mean(axis=0)
+    verts_arr = np.asarray(mesh.vertices)
+    extent = verts_arr.max(axis=0) - verts_arr.min(axis=0)
+    mesh_radius = float(np.linalg.norm(extent)) * 0.5
+
+    scored: list[tuple[float, int]] = []
+
+    for idx, cam in enumerate(cameras):
+        R = cam.R.astype(np.float64)
+        T = cam.T.astype(np.float64)
+        cam_pos = -R.T @ T
+
+        # Distance and direction to mesh centroid
+        to_mesh = centroid - cam_pos
+        dist = float(np.linalg.norm(to_mesh))
+        if dist < 1e-8:
+            continue
+        view_dir = to_mesh / dist
+
+        # Camera forward direction (third row of R = z-axis in camera frame)
+        cam_fwd = R[2, :]
+        cos_angle = float(np.dot(cam_fwd, view_dir))
+
+        # Score: prefer cameras that face the mesh and are at a moderate distance
+        # Closer cameras get slightly higher resolution scores
+        resolution_score = min(mesh_radius / (dist + 1e-3), 2.0)
+        score = max(cos_angle, 0.0) * resolution_score
+
+        scored.append((score, idx))
+
+    # Sort descending by score, then pick the top max_cameras with diverse
+    # azimuth coverage
+    scored.sort(key=lambda x: -x[0])
+
+    # Greedy selection: pick top scorer, then prefer cameras with different
+    # azimuth angles to ensure coverage
+    selected_indices: list[int] = []
+    selected_azimuths: list[float] = []
+
+    for score, idx in scored:
+        if len(selected_indices) >= max_cameras:
+            break
+        cam = cameras[idx]
+        R = cam.R.astype(np.float64)
+        T = cam.T.astype(np.float64)
+        cam_pos = -R.T @ T
+        to_mesh = centroid - cam_pos
+        azimuth = math.atan2(float(to_mesh[0]), float(to_mesh[2]))
+
+        # Accept if it's far enough in azimuth from already-selected cameras
+        # (at least 10 degrees apart) or if we haven't filled half the slots yet
+        min_az_dist = min(
+            (abs(azimuth - a) for a in selected_azimuths),
+            default=math.pi,
+        )
+        # Wrap-around
+        min_az_dist = min(min_az_dist, 2 * math.pi - min_az_dist)
+
+        if min_az_dist > math.radians(10) or len(selected_indices) < max_cameras // 2:
+            selected_indices.append(idx)
+            selected_azimuths.append(azimuth)
+
+    # If greedy didn't fill all slots, add remaining top-scored cameras
+    if len(selected_indices) < max_cameras:
+        remaining = [idx for _, idx in scored if idx not in set(selected_indices)]
+        for idx in remaining[: max_cameras - len(selected_indices)]:
+            selected_indices.append(idx)
+
+    logger.info(
+        "Selected %d/%d cameras for texture baking (top by view coverage)",
+        len(selected_indices), len(cameras),
+    )
+    return [cameras[i] for i in selected_indices]
 
 
 # ---------------------------------------------------------------------------

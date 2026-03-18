@@ -418,15 +418,25 @@ def stage_1_extract_frames(config: dict, session: dict) -> bool:
                 video_path=video_path,
                 output_dir=frames_dir,
                 min_flow_threshold=cap_cfg.get("min_flow_threshold", 2.0),
-                max_frames=cap_cfg.get("max_frames", 300),
+                max_frames=cap_cfg.get("max_frames", 80),
+                scene_change_only=cap_cfg.get("scene_change_only", True),
             )
         else:
             extract_frames(
                 video_path=video_path,
                 output_dir=frames_dir,
                 target_fps=cap_cfg.get("target_fps", 2),
-                max_frames=cap_cfg.get("max_frames", 300),
+                max_frames=cap_cfg.get("max_frames", 80),
             )
+
+        # Detect LOG profile for this video and store in session for stage 2
+        from capture.frame_extractor import detect_log_profile
+        log_profile = detect_log_profile(video_path)
+        session["detected_log_profile"] = log_profile
+        if log_profile:
+            log.info("Stage 1: Detected LOG profile '%s' for %s", log_profile, video_path.name)
+        else:
+            log.info("Stage 1: No LOG profile detected — color correction will be skipped")
 
     # --- Process Expert RAW photos if provided ---
     photo_paths = session.get("photo_paths", [])
@@ -475,26 +485,39 @@ def stage_1_extract_frames(config: dict, session: dict) -> bool:
 
 
 def stage_2_color_correct(config: dict, session: dict) -> bool:
-    """Apply LOG to sRGB color correction for COLMAP."""
+    """Apply LOG to sRGB color correction for COLMAP.
+
+    Automatically skips colour correction when the video was not recorded
+    with a LOG profile (detected in stage 1).  Also respects the manual
+    ``color_correction.enabled`` config flag.
+    """
     marker = session["proc_dir"] / ".stage_2_complete"
     if stage_complete(marker):
         log.info("Stage 2: Color correction already complete, skipping")
         return True
 
-    log.info("Stage 2: Applying color correction...")
     cc_cfg = config["capture"]["color_correction"]
 
+    # Determine whether the video is LOG-encoded
+    is_log = session.get("detected_log_profile") is not None
+
     if not cc_cfg.get("enabled", True):
-        log.info("Stage 2: Color correction disabled, copying frames as-is")
+        log.info("Stage 2: Color correction disabled in config, copying frames as-is")
         src = session["proc_dir"] / "frames"
         dst = session["proc_dir"] / "frames_srgb"
         for f in src.glob("*.png"):
             shutil.copy2(f, dst / f.name)
     else:
+        if is_log:
+            log.info("Stage 2: Applying LOG -> sRGB color correction...")
+        else:
+            log.info("Stage 2: No LOG profile — frames will be copied without correction")
+
         from capture.color_correction import batch_color_correct
         batch_color_correct(
             frames_dir=session["proc_dir"] / "frames",
             output_srgb_dir=session["proc_dir"] / "frames_srgb",
+            is_log=is_log,
         )
 
     mark_stage_complete(marker)
@@ -502,7 +525,12 @@ def stage_2_color_correct(config: dict, session: dict) -> bool:
 
 
 def stage_3_filter_frames(config: dict, session: dict) -> bool:
-    """Filter out blurry, overexposed, or faceless frames."""
+    """Filter out blurry, overexposed, or faceless frames.
+
+    Uses *quick_mode* by default (blur + exposure only at half resolution,
+    no face detection) for speed.  Full face-aware filtering is deferred
+    to the pose-aware frame selection step after DA3/COLMAP.
+    """
     marker = session["proc_dir"] / ".stage_3_complete"
     if stage_complete(marker):
         log.info("Stage 3: Frame filtering already complete, skipping")
@@ -513,6 +541,7 @@ def stage_3_filter_frames(config: dict, session: dict) -> bool:
 
     filt_cfg = config["capture"]["filtering"]
     blur_threshold = filt_cfg.get("blur_threshold", 100.0)
+    quick_mode = filt_cfg.get("quick_mode", True)
 
     filter_frames(
         frames_dir=session["proc_dir"] / "frames_srgb",
@@ -521,6 +550,7 @@ def stage_3_filter_frames(config: dict, session: dict) -> bool:
         exposure_low=filt_cfg.get("exposure_low", 30),
         exposure_high=filt_cfg.get("exposure_high", 225),
         require_face=filt_cfg.get("require_face", True),
+        quick_mode=quick_mode,
     )
 
     mark_stage_complete(marker)
@@ -1085,26 +1115,25 @@ def stage_13_train_gaussians(config: dict, session: dict) -> bool:
 
 
 def stage_14_export(config: dict, session: dict) -> bool:
-    """Export final model, renders, and metrics."""
+    """Export final model, renders, and metrics.
+
+    Each sub-step (PLY, mesh, texture, compressed, renders, animation,
+    report) runs inside its own try/except so one failure does not block
+    the rest of the export pipeline.
+    """
     marker = session["out_dir"] / ".stage_14_complete"
     if stage_complete(marker):
         log.info("Stage 14: Export already complete, skipping")
         return True
 
     log.info("Stage 14: Exporting results...")
-    from splatting.exporter import (
-        export_gaussians_ply,
-        extract_mesh_sugar,
-        export_mesh_from_gaussians,
-        export_compressed,
-        render_novel_views,
-    )
-    from splatting.initializer import GaussianModel
     import torch
+    from splatting.initializer import GaussianModel
 
     export_cfg = config["splatting"]["export"]
     out_dir = session["out_dir"]
-    # Trainer saves checkpoints directly in out_dir, not in checkpoints/
+
+    # ---- Load checkpoint ------------------------------------------------
     ckpt_path = out_dir / "final.pt"
     if not ckpt_path.exists():
         ckpt_path = out_dir / "checkpoints" / "final.pt"
@@ -1114,37 +1143,69 @@ def stage_14_export(config: dict, session: dict) -> bool:
         log.error("No checkpoint found in %s", out_dir)
         return False
 
+    log.info("Loading checkpoint from %s", ckpt_path)
     state = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
-    sh_all = torch.cat([state["sh0"], state["shN"]], dim=1)
+
+    # The trainer saves splats as a ParameterDict with keys:
+    #   means, scales, quats, opacities, sh0, shN
+    # plus metadata keys: iteration, loss, psnr, optimizer_states
+    sh_all = torch.cat([state["sh0"], state["shN"]], dim=1)  # (N, 16, 3)
+    opacities = state["opacities"]
+    if opacities.dim() == 1:
+        opacities = opacities.unsqueeze(-1)  # GaussianModel expects (N, 1)
+
     gaussians = GaussianModel(
         positions=state["means"],
         colors_sh=sh_all,
         scales=state["scales"],
         rotations=state["quats"],
-        opacities=state["opacities"].unsqueeze(-1) if state["opacities"].dim() == 1 else state["opacities"],
+        opacities=opacities,
+    )
+    log.info(
+        "Loaded %d Gaussians from checkpoint (iteration %s, PSNR %.2f)",
+        gaussians.num_gaussians,
+        state.get("iteration", "?"),
+        state.get("psnr", 0.0),
     )
 
-    # Standard PLY export
-    export_gaussians_ply(gaussians, out_dir / "gaussians.ply")
+    # Track which sub-steps succeeded
+    substep_ok = {}
 
-    # Mesh extraction: SuGaR first, TSDF fallback
+    # ---- 1. Standard PLY export ----------------------------------------
+    try:
+        from splatting.exporter import export_gaussians_ply
+
+        export_gaussians_ply(gaussians, out_dir / "gaussians.ply")
+        substep_ok["ply"] = True
+    except Exception as e:
+        log.error("PLY export failed: %s", e, exc_info=True)
+        substep_ok["ply"] = False
+
+    # ---- 2. Mesh extraction: SuGaR first, TSDF fallback ----------------
     mesh_path = out_dir / "mesh"
     try:
+        from splatting.exporter import extract_mesh_sugar
+
         extract_mesh_sugar(gaussians, mesh_path)
         log.info("SuGaR mesh extraction succeeded")
+        substep_ok["mesh"] = True
     except Exception as e:
         log.warning("SuGaR mesh extraction failed (%s); falling back to TSDF", e)
         try:
+            from splatting.exporter import export_mesh_from_gaussians
+
             export_mesh_from_gaussians(gaussians, out_dir / "mesh.obj")
+            substep_ok["mesh"] = True
         except Exception as e2:
             log.error("TSDF mesh extraction also failed: %s", e2)
+            substep_ok["mesh"] = False
 
-    # Texture baking onto extracted mesh
-    mesh_obj = out_dir / "mesh.obj"
-    mesh_ply = out_dir / "mesh.ply"
-    mesh_file = mesh_obj if mesh_obj.exists() else mesh_ply
-    if mesh_file.exists():
-        try:
+    # ---- 3. Texture baking onto extracted mesh --------------------------
+    try:
+        mesh_obj = out_dir / "mesh.obj"
+        mesh_ply = out_dir / "mesh.ply"
+        mesh_file = mesh_obj if mesh_obj.exists() else mesh_ply
+        if mesh_file.exists():
             from splatting.texture_baker import bake_texture
             from splatting.camera_utils import load_cameras_from_colmap
 
@@ -1159,7 +1220,7 @@ def stage_14_export(config: dict, session: dict) -> bool:
             flame_tex = PROJECT_ROOT / "Models" / "Flame" / "FLAME_texture.npz"
             flame_texture_path = flame_tex if flame_tex.exists() else None
 
-            tex_res = export_cfg.get("texture_resolution", 4096)
+            tex_res = export_cfg.get("texture_resolution", 2048)
             bake_texture(
                 mesh_path=mesh_file,
                 cameras=cameras,
@@ -1170,57 +1231,97 @@ def stage_14_export(config: dict, session: dict) -> bool:
                 flame_texture_path=flame_texture_path,
             )
             log.info("Texture baking complete")
-        except Exception as e:
-            log.warning("Texture baking failed: %s", e)
-    else:
-        log.info("No mesh found; skipping texture baking")
+            substep_ok["texture"] = True
+        else:
+            log.info("No mesh found; skipping texture baking")
+            substep_ok["texture"] = None  # skipped, not failed
+    except Exception as e:
+        log.warning("Texture baking failed: %s", e, exc_info=True)
+        substep_ok["texture"] = False
 
-    # Compressed export
+    # ---- 4. Compressed export -------------------------------------------
     try:
+        from splatting.exporter import export_compressed
+
         export_compressed(gaussians, out_dir / "gaussians_compressed")
+        substep_ok["compressed"] = True
     except Exception as e:
         log.warning("Compressed export failed: %s", e)
+        substep_ok["compressed"] = False
 
-    # Turntable renders
-    render_novel_views(
-        gaussians,
-        output_dir=out_dir / "renders",
-        num_views=export_cfg.get("turntable_views", 60),
+    # ---- 5. Turntable renders -------------------------------------------
+    try:
+        from splatting.exporter import render_novel_views
+
+        render_novel_views(
+            gaussians,
+            output_dir=out_dir / "renders",
+            num_views=export_cfg.get("turntable_views", 60),
+        )
+        substep_ok["renders"] = True
+    except Exception as e:
+        log.error("Turntable rendering failed: %s", e, exc_info=True)
+        substep_ok["renders"] = False
+
+    # ---- 6. Animation generation (optional, requires FLAME binding) -----
+    try:
+        binding_meta_path = session["proc_dir"] / "gaussians_binding_meta.npz"
+        flame_params_path = session["proc_dir"] / "flame" / "flame_params.npz"
+        flame_cfg = config.get("reconstruction", {}).get("flame", {})
+        flame_model_path_str = flame_cfg.get("model_path")
+
+        if flame_model_path_str is None:
+            log.info("No FLAME model_path in config; skipping animation generation")
+            substep_ok["animation"] = None
+        else:
+            flame_model_path = Path(flame_model_path_str)
+            if (
+                binding_meta_path.exists()
+                and flame_params_path.exists()
+                and flame_model_path.exists()
+            ):
+                log.info("FLAME binding metadata found — generating demo animations...")
+                from splatting.animator import FaceAnimator
+
+                animator = FaceAnimator(
+                    flame_model_path=flame_model_path,
+                    flame_params=flame_params_path,
+                    binding_metadata=binding_meta_path,
+                    gaussians=gaussians,
+                    device=config.get("device", "cuda"),
+                )
+
+                expressions_yaml = PROJECT_ROOT / "config" / "expressions.yaml"
+                animator.generate_predefined_animations(
+                    output_dir=out_dir / "animations",
+                    fps=30,
+                    presets_path=expressions_yaml if expressions_yaml.exists() else None,
+                )
+                log.info("Animation generation complete: %s", out_dir / "animations")
+                substep_ok["animation"] = True
+            else:
+                log.info("No FLAME binding metadata; skipping animation generation")
+                substep_ok["animation"] = None
+    except Exception as e:
+        log.warning("Animation generation failed (non-fatal): %s", e)
+        substep_ok["animation"] = False
+
+    # ---- 7. Quality report, comparison grid, turntable GIF --------------
+    try:
+        _generate_final_report(config, session)
+        substep_ok["report"] = True
+    except Exception as e:
+        log.warning("Quality report generation failed: %s", e)
+        substep_ok["report"] = False
+
+    # ---- Summary --------------------------------------------------------
+    failed = [k for k, v in substep_ok.items() if v is False]
+    skipped = [k for k, v in substep_ok.items() if v is None]
+    passed = [k for k, v in substep_ok.items() if v is True]
+    log.info(
+        "Stage 14 sub-step results: passed=%s, skipped=%s, failed=%s",
+        passed, skipped, failed,
     )
-
-    # Generate quality report, comparison grid, and turntable GIF
-    _generate_final_report(config, session)
-
-    # --- Animation generation (optional, requires FLAME binding metadata) ---
-    binding_meta_path = session["proc_dir"] / "gaussians_binding_meta.npz"
-    flame_params_path = session["proc_dir"] / "flame" / "flame_params.npz"
-    flame_cfg = config["reconstruction"]["flame"]
-    flame_model_path = Path(flame_cfg["model_path"])
-
-    if binding_meta_path.exists() and flame_params_path.exists() and flame_model_path.exists():
-        log.info("FLAME binding metadata found — generating demo animations...")
-        try:
-            from splatting.animator import FaceAnimator
-
-            animator = FaceAnimator(
-                flame_model_path=flame_model_path,
-                flame_params=flame_params_path,
-                binding_metadata=binding_meta_path,
-                gaussians=gaussians,
-                device=config.get("device", "cuda"),
-            )
-
-            expressions_yaml = PROJECT_ROOT / "config" / "expressions.yaml"
-            animator.generate_predefined_animations(
-                output_dir=out_dir / "animations",
-                fps=30,
-                presets_path=expressions_yaml if expressions_yaml.exists() else None,
-            )
-            log.info("Animation generation complete: %s", out_dir / "animations")
-        except Exception as e:
-            log.warning("Animation generation failed (non-fatal): %s", e)
-    else:
-        log.info("No FLAME binding metadata; skipping animation generation")
 
     mark_stage_complete(marker)
     return True

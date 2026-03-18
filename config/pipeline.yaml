@@ -11,16 +11,19 @@ session:
 capture:
   target_fps: 2  # Frames per second to extract (ignored if motion_based=true)
   motion_based: true  # Use optical flow to select frames with camera motion
+  scene_change_only: true  # Use ffmpeg scene detection only (10x faster, skip optical flow)
   min_flow_threshold: 2.0  # Minimum optical flow magnitude to trigger frame capture
-  max_frames: 300
+  max_frames: 80  # Max frames to extract (80 is sufficient for 10-15s clips)
   color_correction:
     enabled: true
     log_type: "slog3"  # Samsung LOG approximation
+    auto_detect: true  # Auto-detect LOG profile from video metadata; skip correction if not LOG
   filtering:
     blur_threshold: 30.0  # Laplacian variance minimum (lower for selfie/face videos)
     exposure_low: 30  # Minimum mean brightness
     exposure_high: 225  # Maximum mean brightness
     require_face: false  # Set true for face video, false for testing with non-face footage
+    quick_mode: true  # Skip face detection, use half-res blur (faster pre-filter before DA3)
 
 # Stage 2: Sensors
 sensors:

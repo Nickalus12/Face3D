@@ -111,6 +111,7 @@ def export_mesh_from_gaussians(
     # Prepare Gaussian rendering parameters
     scales = torch.exp(gaussians.scales)
     opacities = torch.sigmoid(gaussians.opacities.squeeze(-1))
+    quats = gaussians.rotations / gaussians.rotations.norm(dim=-1, keepdim=True).clamp(min=1e-8)
     bg = torch.zeros(3, device=device)
 
     # Camera intrinsics for Open3D
@@ -137,7 +138,7 @@ def export_mesh_from_gaussians(
         with torch.no_grad():
             renders, alphas, _ = rasterization(
                 means=gaussians.positions,
-                quats=gaussians.rotations,
+                quats=quats,
                 scales=scales,
                 opacities=opacities,
                 colors=gaussians.colors_sh,
@@ -792,6 +793,89 @@ def export_compressed(
 # ---------------------------------------------------------------------------
 
 
+def _ensure_cuda_on_path() -> None:
+    """Ensure nvcc is discoverable so gsplat can JIT-compile CUDA kernels.
+
+    gsplat checks for ``nvcc`` at import time; if it is missing the CUDA
+    backend stays disabled for the entire process.  This function adds
+    the CUDA toolkit ``bin`` directory to ``PATH`` before any gsplat CUDA
+    import so that JIT compilation can proceed.
+    """
+    import os
+    import shutil
+
+    if shutil.which("nvcc") is not None:
+        return  # already on PATH
+
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if cuda_home:
+        nvcc_dir = os.path.join(cuda_home, "bin")
+        if os.path.isfile(os.path.join(nvcc_dir, "nvcc.exe")) or os.path.isfile(
+            os.path.join(nvcc_dir, "nvcc")
+        ):
+            os.environ["PATH"] = nvcc_dir + os.pathsep + os.environ.get("PATH", "")
+            logger.info("Added %s to PATH for gsplat CUDA JIT", nvcc_dir)
+            return
+
+    # Common Windows CUDA install locations
+    for cuda_ver in ("v12.8", "v12.6", "v12.4", "v12.1", "v11.8"):
+        candidate = os.path.join(
+            "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA",
+            cuda_ver, "bin",
+        )
+        nvcc_path = os.path.join(candidate, "nvcc.exe")
+        if os.path.isfile(nvcc_path):
+            os.environ["PATH"] = candidate + os.pathsep + os.environ.get("PATH", "")
+            os.environ["CUDA_HOME"] = os.path.dirname(candidate)
+            logger.info("Auto-detected CUDA at %s", candidate)
+            return
+
+
+def _get_rasterizer():
+    """Return the best available gsplat rasterization function.
+
+    Prefers ``rasterization_2dgs`` (consistent with the 2DGS trainer) and
+    falls back to the standard ``rasterization`` if unavailable.  Returns
+    a tuple of ``(rasterize_fn, is_2dgs)``.
+    """
+    _ensure_cuda_on_path()
+
+    # Force-reload gsplat backend if _C is None (may happen if nvcc wasn't
+    # on PATH when gsplat was first imported earlier in the process)
+    try:
+        import gsplat.cuda._backend as _backend
+        if _backend._C is None:
+            import importlib
+            importlib.reload(_backend)
+    except Exception:
+        pass
+
+    try:
+        from gsplat.rendering import rasterization_2dgs
+        # Verify the CUDA backend is actually loaded
+        from gsplat.cuda._backend import _C
+        if _C is not None:
+            return rasterization_2dgs, True
+        logger.warning("rasterization_2dgs available but CUDA backend is None")
+    except ImportError:
+        pass
+
+    try:
+        from gsplat import rasterization
+        from gsplat.cuda._backend import _C
+        if _C is not None:
+            return rasterization, False
+    except ImportError:
+        pass
+
+    raise RuntimeError(
+        "gsplat CUDA backend unavailable. Ensure nvcc is on PATH or "
+        "CUDA_HOME is set (e.g. CUDA_HOME='C:/Program Files/NVIDIA GPU "
+        "Computing Toolkit/CUDA/v12.8'). You may also need to reinstall "
+        "gsplat with CUDA support: pip install gsplat --no-cache-dir"
+    )
+
+
 def render_novel_views(
     gaussians: GaussianModel,
     cameras: list[Camera] | None = None,
@@ -803,6 +887,9 @@ def render_novel_views(
     If cameras is None, generates turntable cameras automatically from
     the Gaussian positions.
 
+    Uses ``rasterization_2dgs`` when available (matching the 2DGS trainer)
+    and falls back to the standard ``rasterization`` otherwise.
+
     Args:
         gaussians: Trained GaussianModel.
         cameras: Optional pre-defined camera list. If None, generates turntable.
@@ -812,7 +899,8 @@ def render_novel_views(
     Returns:
         Path to the output directory containing rendered frames.
     """
-    from gsplat import rasterization
+    rasterize_fn, is_2dgs = _get_rasterizer()
+    logger.info("Render backend: %s", "rasterization_2dgs" if is_2dgs else "rasterization")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     gaussians = gaussians.to(device)
@@ -833,9 +921,14 @@ def render_novel_views(
             image_height=800,
         )
 
+    # Activate parameters for rendering (2DGS-compatible):
+    # - scales are stored in log-space -> exp
+    # - opacities are stored in logit-space -> sigmoid
+    # - quaternions need normalization for correct rotation matrices
     scales = torch.exp(gaussians.scales)
     opacities = torch.sigmoid(gaussians.opacities.squeeze(-1))
-    bg = torch.ones(3, device=device)  # white background for face renders
+    quats = gaussians.rotations
+    quats = quats / quats.norm(dim=-1, keepdim=True).clamp(min=1e-8)
 
     logger.info("Rendering %d novel views...", len(cameras))
 
@@ -844,19 +937,38 @@ def render_novel_views(
         K = cam.get_K(device)
 
         with torch.no_grad():
-            renders, alphas, _ = rasterization(
-                means=gaussians.positions,
-                quats=gaussians.rotations,
-                scales=scales,
-                opacities=opacities,
-                colors=gaussians.colors_sh,
-                viewmats=viewmat[None],
-                Ks=K[None],
-                width=cam.width,
-                height=cam.height,
-                sh_degree=3,
-                packed=True,
-            )
+            if is_2dgs:
+                # rasterization_2dgs returns:
+                #   (colors, alphas, normals, surf_normals, distort,
+                #    median_depth, meta)
+                colors_out, alphas, *_ = rasterize_fn(
+                    means=gaussians.positions,
+                    quats=quats,
+                    scales=scales,
+                    opacities=opacities,
+                    colors=gaussians.colors_sh,
+                    viewmats=viewmat[None],
+                    Ks=K[None],
+                    width=cam.width,
+                    height=cam.height,
+                    sh_degree=3,
+                    packed=True,
+                )
+                renders = colors_out
+            else:
+                renders, alphas, _ = rasterize_fn(
+                    means=gaussians.positions,
+                    quats=quats,
+                    scales=scales,
+                    opacities=opacities,
+                    colors=gaussians.colors_sh,
+                    viewmats=viewmat[None],
+                    Ks=K[None],
+                    width=cam.width,
+                    height=cam.height,
+                    sh_degree=3,
+                    packed=True,
+                )
 
         rgb = renders[0].cpu().numpy()  # (H, W, 3)
         alpha = alphas[0, :, :, 0].cpu().numpy()  # (H, W)
@@ -931,6 +1043,7 @@ def compute_metrics(
 
     scales = torch.exp(gaussians.scales)
     opacities = torch.sigmoid(gaussians.opacities.squeeze(-1))
+    quats = gaussians.rotations / gaussians.rotations.norm(dim=-1, keepdim=True).clamp(min=1e-8)
 
     psnr_values = []
     ssim_values = []
@@ -965,7 +1078,7 @@ def compute_metrics(
         with torch.no_grad():
             renders, alphas, _ = rasterization(
                 means=gaussians.positions,
-                quats=gaussians.rotations,
+                quats=quats,
                 scales=scales,
                 opacities=opacities,
                 colors=gaussians.colors_sh,

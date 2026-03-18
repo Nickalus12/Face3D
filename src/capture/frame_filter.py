@@ -70,6 +70,7 @@ def check_blur(
     frame: np.ndarray,
     threshold: float = 100.0,
     face_bbox: Optional[tuple[int, int, int, int]] = None,
+    half_res: bool = True,
 ) -> tuple[bool, float]:
     """Detect blur using the variance of the Laplacian.
 
@@ -78,16 +79,24 @@ def check_blur(
     face-reconstruction pipelines (the background may be intentionally
     blurred with shallow DOF).
 
+    When *half_res* is ``True`` (default) and no face bbox is provided,
+    the frame is downscaled 2x before computing the Laplacian.  Because
+    Laplacian variance scales linearly with resolution, the threshold is
+    halved internally for a consistent result with ~4x fewer pixels.
+
     Args:
         frame: BGR uint8 image (as loaded by OpenCV).
         threshold: Minimum Laplacian variance to consider the frame sharp.
             Typical values range from 50 (lenient) to 200 (strict).
         face_bbox: Optional (x, y, w, h) face bounding box in pixels.
             When given, blur is evaluated only within this region.
+        half_res: If ``True``, compute blur at half resolution for speed
+            (only when face_bbox is not provided).
 
     Returns:
         Tuple of (is_sharp, laplacian_variance). ``is_sharp`` is ``True``
-        when the variance meets or exceeds *threshold*.
+        when the variance meets or exceeds *threshold*.  The returned
+        variance is scaled back to full-resolution equivalent.
     """
     if face_bbox is not None:
         bx, by, bw, bh = face_bbox
@@ -96,10 +105,20 @@ def check_blur(
             roi = frame[by:by + bh, bx:bx + bw]
         else:
             roi = frame
-    else:
-        roi = frame
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        variance = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        return variance >= threshold, variance
 
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    # No face bbox — optionally use half resolution for speed
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    if half_res and gray.shape[0] > 500 and gray.shape[1] > 500:
+        h, w = gray.shape[:2]
+        gray_half = cv2.resize(gray, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
+        variance_half = float(cv2.Laplacian(gray_half, cv2.CV_64F).var())
+        # Scale variance back to approximate full-res equivalent
+        variance = variance_half * 2.0
+        return variance >= threshold, variance
+
     variance = float(cv2.Laplacian(gray, cv2.CV_64F).var())
     return variance >= threshold, variance
 
@@ -250,6 +269,7 @@ def filter_frames(
     require_face: bool = True,
     face_confidence: float = 0.5,
     min_face_area_ratio: float = _MIN_FACE_AREA_RATIO,
+    quick_mode: bool = False,
 ) -> list[Path]:
     """Filter a directory of frames by quality and write selection results.
 
@@ -259,6 +279,11 @@ def filter_frames(
 
     Blur is evaluated over the detected face region (when available) so
     that shallow-DOF background blur does not cause false rejections.
+
+    When *quick_mode* is ``True``, face detection is skipped entirely
+    (regardless of *require_face*) and blur is computed at half resolution
+    for speed.  This is useful as a fast pre-filter before DA3, with full
+    face-aware filtering deferred to the pose-aware selection stage.
 
     Args:
         frames_dir: Directory containing input frames (PNG/JPG).
@@ -270,6 +295,8 @@ def filter_frames(
         face_confidence: Minimum MediaPipe detection confidence.
         min_face_area_ratio: Minimum fraction of the frame the face
             bounding box must cover.
+        quick_mode: If ``True``, skip face detection and use half-res
+            blur checks for maximum speed.
 
     Returns:
         List of paths to frames that passed all quality checks.
@@ -290,7 +317,14 @@ def filter_frames(
         output_json.write_text(json.dumps(report, indent=2), encoding="utf-8")
         return []
 
-    logger.info("Filtering %d frames from %s", len(frame_files), frames_dir)
+    effective_require_face = require_face and not quick_mode
+    if quick_mode:
+        logger.info(
+            "Filtering %d frames from %s (QUICK MODE: blur+exposure only, half-res)",
+            len(frame_files), frames_dir,
+        )
+    else:
+        logger.info("Filtering %d frames from %s", len(frame_files), frames_dir)
 
     selected: list[Path] = []
     report_frames: list[dict] = []
@@ -300,7 +334,7 @@ def filter_frames(
     # proper resource cleanup.
     face_detector_ctx = None
     face_detector = None
-    if require_face and _MEDIAPIPE_AVAILABLE and _mp_face_detection is not None:
+    if effective_require_face and _MEDIAPIPE_AVAILABLE and _mp_face_detection is not None:
         face_detector_ctx = _mp_face_detection.FaceDetection(
             model_selection=0,
             min_detection_confidence=face_confidence,
@@ -325,7 +359,7 @@ def filter_frames(
             face_bbox: Optional[tuple[int, int, int, int]] = None
 
             # Face detection check (run first so we can use the bbox for blur)
-            if require_face:
+            if effective_require_face:
                 face_found, conf, face_bbox = check_face_present(
                     frame,
                     min_confidence=face_confidence,
@@ -348,6 +382,7 @@ def filter_frames(
             # Blur check (use face region when available for more relevant metric)
             is_sharp, lap_var = check_blur(
                 frame, threshold=blur_threshold, face_bbox=face_bbox,
+                half_res=quick_mode,
             )
             details["laplacian_variance"] = round(lap_var, 2)
             if not is_sharp:
@@ -407,6 +442,7 @@ def filter_frames(
                 "face_confidence": face_confidence,
                 "min_face_area_ratio": min_face_area_ratio,
                 "mediapipe_available": _MEDIAPIPE_AVAILABLE,
+                "quick_mode": quick_mode,
             },
         },
         "frames": report_frames,

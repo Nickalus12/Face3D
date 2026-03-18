@@ -16,6 +16,8 @@ Optimizations (research-backed):
     - Depth loss with decay
     - LR warmup for position learning rate
     - 3000 iterations default (sufficient with good initialization)
+    - SelectiveAdam: visibility-aware optimizer, updates only visible Gaussians (20-40% faster)
+    - MCMCStrategy: fixed Gaussian count via MCMC sampling (consistent speed, no growth)
 """
 
 from __future__ import annotations
@@ -104,6 +106,21 @@ except ImportError:
     )
 
 # ---------------------------------------------------------------------------
+# SelectiveAdam: visibility-aware optimizer (Taming3DGS)
+# Only updates parameters for Gaussians visible in the current view.
+# Falls back to standard Adam if unavailable (gsplat < 1.4.0).
+# ---------------------------------------------------------------------------
+
+_SELECTIVE_ADAM_AVAILABLE = False
+try:
+    from gsplat.optimizers import SelectiveAdam
+    _SELECTIVE_ADAM_AVAILABLE = True
+    logger.info("SelectiveAdam available (gsplat.optimizers.SelectiveAdam)")
+except ImportError:
+    SelectiveAdam = None
+    logger.info("SelectiveAdam unavailable — will use standard Adam optimizers")
+
+# ---------------------------------------------------------------------------
 # LPIPS: lazy-loaded singleton to avoid import cost until needed
 # ---------------------------------------------------------------------------
 
@@ -176,8 +193,13 @@ class TrainingConfig:
     # Iterations — 3K is sufficient with good initialization and progressive training
     iterations: int = 3_000
 
-    # Strategy selection: "default" uses clone/split/prune, "mcmc" uses MCMC sampling
-    strategy: Literal["default", "mcmc"] = "default"
+    # Strategy selection: "default" uses clone/split/prune, "mcmc" uses MCMC sampling,
+    # "auto" selects based on scene type (currently maps to "default")
+    strategy: Literal["default", "mcmc", "auto"] = "default"
+
+    # SelectiveAdam: visibility-aware optimizer that only updates visible Gaussians.
+    # 20-40% faster optimizer step. Falls back to standard Adam if unavailable.
+    use_selective_adam: bool = True
 
     # Learning rates (per-parameter)
     lr_means: float = 1.6e-4
@@ -241,10 +263,13 @@ class TrainingConfig:
     max_num_gaussians: int = 500_000  # Hard cap for 16GB VRAM (~8GB for 500K Gaussians)
 
     # MCMC-specific parameters (only used when strategy="mcmc")
-    mcmc_cap_max: int = 500_000
+    # MCMC maintains a fixed Gaussian count via teleportation + sampling — no growth/split
+    mcmc_cap_max: int = 200_000  # Max Gaussians (MCMC enforces this internally)
     mcmc_noise_lr: float = 5e5
     mcmc_refine_every: int = 100
     mcmc_refine_start_iter: int = 500
+    mcmc_refine_stop_iter: int = 0  # 0 = auto (80% of iterations)
+    mcmc_min_opacity: float = 0.005  # Minimum opacity for teleportation
 
     # SH degree scheduling — SH1 (4 coefficients) is sufficient for face scenes
     # with controlled lighting. SH3 drops throughput from ~12 it/s to ~4.5 it/s.
@@ -508,7 +533,14 @@ class GaussianTrainer:
         strategy, strategy_state = self._create_strategy(splats, scene_scale)
 
         # --- Per-parameter optimizers ---
+        # When SelectiveAdam is active, each per-key optimizer is a SelectiveAdam
+        # instance that accepts a visibility mask in step(). Structure is the same
+        # as standard Adam (per-key dict) for gsplat strategy compatibility.
         optimizers = self._create_optimizers(splats)
+        _using_selective_adam = _SELECTIVE_ADAM_AVAILABLE and cfg.use_selective_adam
+
+        # Resolve effective strategy name for logging/branching
+        _effective_strategy = cfg.strategy if cfg.strategy != "auto" else "default"
 
         # --- Appearance embedding ---
         appearance_mlp = None
@@ -559,8 +591,10 @@ class GaussianTrainer:
                 )
 
         logger.info(
-            "Training with %d cameras for %d iterations (strategy=%s, 2dgs=%s, amp=%s)",
-            num_cameras, cfg.iterations, cfg.strategy, use_2dgs, use_amp,
+            "Training with %d cameras for %d iterations "
+            "(strategy=%s, 2dgs=%s, amp=%s, selective_adam=%s)",
+            num_cameras, cfg.iterations, _effective_strategy, use_2dgs, use_amp,
+            _using_selective_adam,
         )
 
         # Active SH degree (start at 0, increase over time)
@@ -857,16 +891,7 @@ class GaussianTrainer:
             info["height"] = h_train
             info["n_cameras"] = num_cameras
 
-            if cfg.strategy == "default":
-                strategy.step_post_backward(
-                    params=splats,
-                    optimizers=optimizers,
-                    state=strategy_state,
-                    step=iteration,
-                    info=info,
-                    packed=cfg.packed,
-                )
-            else:
+            if _effective_strategy == "mcmc":
                 strategy.step_post_backward(
                     params=splats,
                     optimizers=optimizers,
@@ -875,18 +900,61 @@ class GaussianTrainer:
                     info=info,
                     lr=cfg.mcmc_noise_lr,
                 )
+            else:
+                strategy.step_post_backward(
+                    params=splats,
+                    optimizers=optimizers,
+                    state=strategy_state,
+                    step=iteration,
+                    info=info,
+                    packed=cfg.packed,
+                )
 
             # --- Optimiser step ---
-            if scaler is not None:
-                for opt in optimizers.values():
-                    scaler.step(opt)
-                scaler.update()
-            else:
-                for opt in optimizers.values():
-                    opt.step()
+            # SelectiveAdam: pass visibility mask so only visible Gaussians are updated.
+            # Visibility is derived from rasterization radii (radii > 0 = visible).
+            _splat_keys = {"means", "scales", "quats", "opacities", "sh0", "shN"}
 
-            for opt in optimizers.values():
-                opt.zero_grad(set_to_none=True)
+            if _using_selective_adam:
+                # Extract visibility from rasterization info
+                vis_mask = None
+                if "radii" in info:
+                    radii = info["radii"]  # (1, N) or (N,)
+                    if radii.dim() == 2:
+                        vis_mask = radii[0] > 0  # (N,)
+                    else:
+                        vis_mask = radii > 0  # (N,)
+
+                if scaler is not None:
+                    # Unscale all optimizers first, then step with visibility
+                    for opt in optimizers.values():
+                        scaler.unscale_(opt)
+                    for key, opt in optimizers.items():
+                        if key in _splat_keys:
+                            opt.step(visibility=vis_mask)
+                        else:
+                            opt.step()
+                    scaler.update()
+                else:
+                    for key, opt in optimizers.items():
+                        if key in _splat_keys:
+                            opt.step(visibility=vis_mask)
+                        else:
+                            opt.step()
+
+                for opt in optimizers.values():
+                    opt.zero_grad(set_to_none=True)
+            else:
+                if scaler is not None:
+                    for opt in optimizers.values():
+                        scaler.step(opt)
+                    scaler.update()
+                else:
+                    for opt in optimizers.values():
+                        opt.step()
+
+                for opt in optimizers.values():
+                    opt.zero_grad(set_to_none=True)
 
             # --- Logging ---
             with torch.no_grad():
@@ -915,7 +983,8 @@ class GaussianTrainer:
                 )
 
             # --- VRAM safety: enforce Gaussian cap ---
-            if n_gs > cfg.max_num_gaussians:
+            # MCMC strategy enforces cap_max internally — skip manual pruning
+            if _effective_strategy != "mcmc" and n_gs > cfg.max_num_gaussians:
                 logger.warning(
                     "Gaussian count %d exceeds cap %d — pruning lowest-opacity Gaussians",
                     n_gs, cfg.max_num_gaussians,
@@ -1012,16 +1081,36 @@ class GaussianTrainer:
         """Instantiate the chosen gsplat Strategy and initialise its state."""
         cfg = self.config
 
-        if cfg.strategy == "mcmc":
+        # Resolve "auto" strategy: for face scenes (bounded, known geometry)
+        # MCMC is a good fit, but default is more battle-tested, so "auto"
+        # currently maps to "default" for safety.
+        effective_strategy = cfg.strategy
+        if effective_strategy == "auto":
+            effective_strategy = "default"
+            logger.info("Strategy 'auto' resolved to 'default'")
+
+        if effective_strategy == "mcmc":
             from gsplat import MCMCStrategy
+
+            # Auto refine_stop_iter: 80% of total iterations if set to 0
+            mcmc_refine_stop = (
+                cfg.mcmc_refine_stop_iter
+                if cfg.mcmc_refine_stop_iter > 0
+                else int(cfg.iterations * 0.8)
+            )
 
             strategy = MCMCStrategy(
                 cap_max=cfg.mcmc_cap_max,
                 noise_lr=cfg.mcmc_noise_lr,
                 refine_every=cfg.mcmc_refine_every,
                 refine_start_iter=cfg.mcmc_refine_start_iter,
+                refine_stop_iter=mcmc_refine_stop,
+                min_opacity=cfg.mcmc_min_opacity,
             )
-            logger.info("Using MCMCStrategy (cap_max=%d)", cfg.mcmc_cap_max)
+            logger.info(
+                "Using MCMCStrategy (cap_max=%d, refine_stop=%d, min_opacity=%.4f)",
+                cfg.mcmc_cap_max, mcmc_refine_stop, cfg.mcmc_min_opacity,
+            )
         else:
             from gsplat import DefaultStrategy
 
@@ -1058,9 +1147,42 @@ class GaussianTrainer:
     # Optimiser creation
     # ------------------------------------------------------------------
 
-    def _create_optimizers(self, splats: torch.nn.ParameterDict) -> dict[str, torch.optim.Adam]:
-        """Create per-parameter Adam optimisers."""
+    def _create_optimizers(
+        self,
+        splats: torch.nn.ParameterDict,
+    ) -> dict[str, torch.optim.Adam]:
+        """Create per-parameter optimisers for Gaussian splat parameters.
+
+        When ``use_selective_adam=True`` and SelectiveAdam is available, creates
+        per-key SelectiveAdam optimizers. SelectiveAdam only updates visible
+        Gaussians per iteration, giving 20-40% faster optimizer steps.
+
+        Per-key structure is preserved for gsplat strategy compatibility --
+        strategies (DefaultStrategy, MCMCStrategy) need per-key optimizer access
+        to grow/prune/teleport individual Gaussian parameter tensors.
+
+        When SelectiveAdam is unavailable or disabled, falls back to standard
+        per-parameter Adam optimizers.
+        """
         cfg = self.config
+
+        # --- SelectiveAdam path: per-key SelectiveAdam optimizers ---
+        if cfg.use_selective_adam and _SELECTIVE_ADAM_AVAILABLE:
+            logger.info("Using SelectiveAdam for splat parameters (visibility-aware)")
+            return {
+                "means": SelectiveAdam([splats["means"]], lr=cfg.lr_means, eps=1e-15),
+                "scales": SelectiveAdam([splats["scales"]], lr=cfg.lr_scales, eps=1e-15),
+                "quats": SelectiveAdam([splats["quats"]], lr=cfg.lr_quats, eps=1e-15),
+                "opacities": SelectiveAdam([splats["opacities"]], lr=cfg.lr_opacities, eps=1e-15),
+                "sh0": SelectiveAdam([splats["sh0"]], lr=cfg.lr_sh0, eps=1e-15),
+                "shN": SelectiveAdam([splats["shN"]], lr=cfg.lr_shN, eps=1e-15),
+            }
+
+        # --- Standard per-parameter Adam path ---
+        if cfg.use_selective_adam and not _SELECTIVE_ADAM_AVAILABLE:
+            logger.info(
+                "SelectiveAdam requested but unavailable — falling back to standard Adam"
+            )
         return {
             "means": torch.optim.Adam([splats["means"]], lr=cfg.lr_means, eps=1e-15),
             "scales": torch.optim.Adam([splats["scales"]], lr=cfg.lr_scales, eps=1e-15),
