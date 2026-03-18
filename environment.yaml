@@ -1,0 +1,55 @@
+# Face3D Conda Environment
+# Install: conda env create -f environment.yaml
+# Activate: conda activate face3d
+
+name: face3d
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pytorch>=2.2
+  - torchvision>=0.17
+  - pytorch-cuda=12.1
+  - numpy>=1.26
+  - scipy>=1.12
+  - pip
+
+  - pip:
+    # Computer Vision
+    - opencv-python>=4.9
+    - mediapipe>=0.10.14
+    - scikit-image>=0.22
+
+    # 3D Processing
+    - open3d>=0.18
+    - trimesh>=4.0
+
+    # Video / Color
+    - ffmpeg-python>=0.2
+    - rawpy>=0.19
+    - colour-science>=0.4
+
+    # Configuration
+    - pyyaml
+    - hydra-core>=1.3
+
+    # Visualization / Monitoring
+    - tensorboard
+    - tqdm
+    - matplotlib
+    - Pillow
+
+    # Utilities
+    - lpips  # Perceptual loss metric
+    # NOTE: chumpy is NOT needed — our FLAMEModel loads .pkl directly with numpy/torch
+
+    # NOTE: These require special install steps (run after env creation):
+    #   pip install gsplat                  # Needs MSVC build tools for CUDA kernels
+    #   pip install pycolmap                # COLMAP Python bindings
+    #   pip install "pytorch3d @ git+https://github.com/facebookresearch/pytorch3d.git"
+    #   pip install git+https://github.com/bytedance-seed/depth-anything-3.git  # DA3 (recommended)
+    #   OR: pip install git+https://github.com/DepthAnything/Depth-Anything-V2.git  # DA2 (fallback)

@@ -1,0 +1,116 @@
+# Face3D Pipeline Configuration
+# Master config for the full reconstruction pipeline
+
+# Session settings
+session:
+  id: null  # Auto-generated if null (timestamp-based)
+  data_root: "D:/Projects/3D/data"
+  models_root: "D:/Projects/3D/Models"
+
+# Stage 1: Capture
+capture:
+  target_fps: 2  # Frames per second to extract (ignored if motion_based=true)
+  motion_based: true  # Use optical flow to select frames with camera motion
+  min_flow_threshold: 2.0  # Minimum optical flow magnitude to trigger frame capture
+  max_frames: 300
+  color_correction:
+    enabled: true
+    log_type: "slog3"  # Samsung LOG approximation
+  filtering:
+    blur_threshold: 30.0  # Laplacian variance minimum (lower for selfie/face videos)
+    exposure_low: 30  # Minimum mean brightness
+    exposure_high: 225  # Maximum mean brightness
+    require_face: false  # Set true for face video, false for testing with non-face footage
+
+# Stage 2: Sensors
+sensors:
+  imu:
+    enabled: true
+    source: "video_metadata"  # "video_metadata" or "sidecar"
+    sidecar_path: null
+    sample_rate: 100.0  # Hz, for Madgwick filter
+  madgwick:
+    beta: 0.1  # Filter gain (higher = more responsive, noisier)
+  gravity_alignment: true
+  generate_colmap_priors: true
+
+# Stage 3: Depth Estimation
+depth:
+  model: "auto"  # "auto" prefers DA3, falls back to DA2. Or: "da3", "da2"
+  model_size: "vitl"  # DA2: vits/vitb/vitl/vitg. DA3: da3-large/da3-giant/etc.
+  batch_size: 4  # Reduce if OOM on 16GB VRAM
+  input_resolution: 1024  # Shortest side for depth model input
+  align_to_colmap: true
+  generate_pointcloud: true
+  pointcloud:
+    voxel_size: 0.005
+    outlier_nb_neighbors: 20
+    outlier_std_ratio: 2.0
+
+# Stage 4: Reconstruction
+reconstruction:
+  use_da3_unified: true  # When true, stage 6 uses DA3 to replace COLMAP+depth+alignment
+  da3:
+    process_res: 504  # DA3 processing resolution (higher = better quality, more VRAM)
+    use_ray_pose: false  # Use ray-based pose estimation (alternative to camera decoder)
+    chunk_size: 8  # Frames per DA3 inference call (8 fits in 16GB VRAM at res=504)
+    conf_threshold: 0.3  # Minimum confidence for dense point cloud points
+  colmap:
+    binary: "D:/Projects/3D/COLMAP/COLMAP-3.9.1-windows-cuda/COLMAP.bat"
+    camera_model: "OPENCV"
+    single_camera: true
+    max_image_size: 3840
+    max_num_features: 8192
+    use_gpu: true
+    sequential_matching:
+      overlap: 15
+      loop_detection: true
+  landmarks:
+    max_faces: 1
+    min_detection_confidence: 0.5
+  flame:
+    model_path: "D:/Projects/3D/Models/Flame/flame2023_Open.pkl"
+    model_path_academic: "D:/Projects/3D/Models/Flame/FLAME2023/flame2023.pkl"
+    masks_path: "D:/Projects/3D/Models/Flame/FLAME_masks.pkl"
+    embedding_path: "D:/Projects/3D/Models/Flame/mediapipe_landmark_embedding.npz"
+    texture_path: "D:/Projects/3D/Models/Flame/FLAME_texture.npz"
+    num_shape_coeffs: 100
+    num_expression_coeffs: 50
+    fitting:
+      num_iterations: 1000
+      learning_rate: 0.01
+      shape_reg_weight: 1.0e-4
+      expression_reg_weight: 1.0e-4
+      pose_reg_weight: 1.0e-3
+  segmentation:
+    model_type: "mediapipe"
+
+# Stage 5: Gaussian Splatting
+splatting:
+  initialization: "flame_mesh"  # "flame_mesh", "pointcloud", "colmap_sparse"
+  num_surface_samples: 200000  # Points to sample from FLAME mesh
+  training:
+    iterations: 7000  # Good quality, ~3-5 min on RTX 3080
+    max_num_gaussians: 500000  # Hard cap for 16GB VRAM
+    grow_grad2d: 0.0005  # Higher = fewer new Gaussians = less VRAM
+    refine_stop_iter: 5000  # Stop growing early
+    refine_every: 200  # Densify less often
+    checkpoint_interval: 2000
+    eval_interval: 500
+  export:
+    mesh_voxel_size: 0.005
+    turntable_views: 60
+    render_resolution: [1920, 1080]
+
+# Photo settings (Expert RAW / additional high-quality photos)
+photos:
+  enabled: true
+  weight: 3.0  # How much more to weight photo views vs video frames during training
+  raw_processing:
+    demosaic: "DHT"  # Best quality demosaicing for DNG files
+    use_camera_wb: true
+    output_bps: 16
+
+# Hardware
+device: "cuda"
+num_workers: 4

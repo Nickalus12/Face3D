@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment
+.env
+*.env
+face3d/
+
+# Data (large files)
+data/raw/
+data/processed/
+data/output/
+backyard_frames/
+depth_output/
+
+# COLMAP workspace data (large binary files)
+colmap_workspace/dense/
+colmap_workspace/sparse/*/images.bin
+colmap_workspace/sparse/*/points3D.bin
+*.db
+
+# Models (large, downloaded separately)
+Models/
+!Models/.gitkeep
+
+# COLMAP binary
+COLMAP/
+
+# 3D outputs
+*.ply
+*.3mf
+*.obj
+*.mtl
+*.glb
+*.gltf
+
+# Depth maps
+*.npy
+*.npz
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+nul
+
+# Stage completion markers
+.stage_*_complete
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
