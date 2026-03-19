@@ -148,7 +148,14 @@ export default function App() {
 
   const handleSelectSessionFromWelcome = useCallback((session: any) => {
     selectSession(session);
-    setActiveView('view');
+    // Route to the best view that has actual content
+    if (session.has_gaussians) {
+      setActiveView('view');  // Has a 3D model — show it
+    } else if (session.has_renders) {
+      setActiveView('gallery');  // Has renders but no model — show gallery
+    } else {
+      setActiveView('pipeline');  // Nothing yet — show pipeline status
+    }
   }, [selectSession]);
 
   // Determine if we should show the welcome screen
@@ -178,7 +185,7 @@ export default function App() {
           }`}
           style={isPanelOpen ? { width: `${panelWidth}px` } : undefined}
         >
-          <DetailPanel isExpanded={isPanelOpen} />
+          <DetailPanel isExpanded={isPanelOpen} onSelectSession={handleSelectSessionFromWelcome} />
 
           {/* Master Control */}
           <div className="p-3 border-t border-border bg-zinc-900/20 shrink-0">

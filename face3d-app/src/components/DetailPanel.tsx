@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 interface DetailPanelProps {
   isExpanded?: boolean;
+  onSelectSession?: (session: any) => void;
 }
 
 type SortMode = "newest" | "oldest" | "name" | "status";
@@ -53,7 +54,7 @@ function formatSize(bytes?: number): string {
 
 // ── Component ─────────────────────────────────────────────────
 
-export const DetailPanel: React.FC<DetailPanelProps> = ({ isExpanded = true }) => {
+export const DetailPanel: React.FC<DetailPanelProps> = ({ isExpanded = true, onSelectSession }) => {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortMode, setSortMode] = useState<SortMode>("newest");
   const [filterComplete, setFilterComplete] = useState<"all" | "complete" | "pending">("all");
@@ -113,7 +114,7 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({ isExpanded = true }) =
   return (
     <div className="flex flex-col h-full w-full">
       {/* Header */}
-      <div className="shrink-0 px-3 pt-3 pb-1">
+      <div className="shrink-0 px-4 pt-4 pb-1">
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">
             Sessions
@@ -187,7 +188,7 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({ isExpanded = true }) =
             return (
               <button
                 key={session.id}
-                onClick={() => selectSession(session)}
+                onClick={() => { selectSession(session); onSelectSession?.(session); }}
                 onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, sessionId: session.id }); }}
                 className={`w-full text-left px-3 py-2.5 transition-colors duration-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-indigo-500/40 ${
                   isSelected
