@@ -345,90 +345,47 @@ const MetricBadge: React.FC<{ label: string; value: string; color: string }> = (
 
 const IdleState: React.FC = () => {
   const stageEntries = Object.entries(STAGE_INFO).map(([k, v]) => ({ num: Number(k), ...v }));
-  // Group into phases
-  const phases = [
-    { label: 'Capture', stages: stageEntries.filter(s => s.num <= 3), color: 'violet' },
-    { label: 'Sensors', stages: stageEntries.filter(s => s.num >= 4 && s.num <= 5), color: 'cyan' },
-    { label: 'Reconstruction', stages: stageEntries.filter(s => s.num >= 6 && s.num <= 11), color: 'indigo' },
-    { label: 'Splatting', stages: stageEntries.filter(s => s.num >= 12 && s.num <= 14), color: 'emerald' },
-  ];
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-4xl mx-auto px-8 py-12">
-        {/* 3D Visualizer Hero */}
+      <div className="max-w-2xl mx-auto px-8 py-10">
+        {/* Header */}
         <div className="mb-8">
-          <PipelineVisualizer completedStages={0} className="max-w-md mx-auto" />
-        </div>
-        <div className="text-center mb-12">
-          <h2 className="text-2xl font-bold text-zinc-100 mb-3">Pipeline Ready</h2>
-          <p className="text-sm text-zinc-500 max-w-lg mx-auto leading-relaxed">
-            Start a new scan or re-run the pipeline on an existing session. The 15-stage pipeline transforms your captures into 3D Gaussian Splats.
+          <h2 className="text-xl font-bold text-zinc-100 mb-2">Pipeline</h2>
+          <p className="text-sm text-zinc-500">
+            Select a session and start a scan, or re-run the pipeline. 15 stages from video to 3D Gaussian Splat.
           </p>
         </div>
 
-        {/* Pipeline overview — shows all stages grouped by phase */}
-        <div className="space-y-6">
-          {phases.map((phase) => (
-            <div key={phase.label} className="rounded-2xl border border-zinc-800/60 bg-zinc-900/30 overflow-hidden">
-              {/* Phase header */}
-              <div className="px-5 py-3 border-b border-zinc-800/40 flex items-center gap-3">
-                <div className={`w-2 h-2 rounded-full bg-${phase.color}-500/60`} />
-                <span className="text-xs font-semibold text-zinc-300 uppercase tracking-wider">{phase.label}</span>
-                <span className="text-[11px] text-zinc-600">{phase.stages.length} stages</span>
+        {/* Stage list — clean vertical layout with generous spacing */}
+        <div className="space-y-1">
+          {stageEntries.map((stage) => {
+            const Icon = stage.icon;
+            return (
+              <div key={stage.num} className="flex items-center gap-4 py-3 px-4 rounded-xl hover:bg-zinc-800/20 transition-colors group">
+                <div className="w-8 h-8 rounded-lg bg-zinc-800/50 border border-zinc-700/30 flex items-center justify-center shrink-0 group-hover:border-zinc-600/50 transition-colors">
+                  <Icon size={15} className="text-zinc-500 group-hover:text-zinc-400 transition-colors" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-mono text-zinc-600 w-5">{stage.num}</span>
+                    <span className="text-sm font-medium text-zinc-300">{stage.name}</span>
+                  </div>
+                </div>
+                <span className="text-xs text-zinc-700 hidden sm:block max-w-[200px] truncate">{stage.description}</span>
               </div>
-              {/* Stage list */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-px bg-zinc-800/20">
-                {phase.stages.map((stage) => {
-                  const Icon = stage.icon;
-                  return (
-                    <div key={stage.num} className="px-5 py-4 bg-[#0c0c0e] hover:bg-zinc-800/20 transition-colors group">
-                      <div className="flex items-start gap-3">
-                        <div className={`w-9 h-9 rounded-xl bg-${stage.color}-500/10 border border-${stage.color}-500/20 flex items-center justify-center shrink-0 group-hover:bg-${stage.color}-500/20 transition-colors`}>
-                          <Icon size={16} className={`text-${stage.color}-400/70`} />
-                        </div>
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="text-[11px] font-mono text-zinc-600">{stage.num.toString().padStart(2, '0')}</span>
-                            <span className="text-sm font-medium text-zinc-300">{stage.name}</span>
-                          </div>
-                          <p className="text-xs text-zinc-600 leading-relaxed">{stage.description}</p>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Flow summary */}
-        <div className="mt-10 flex items-center justify-center gap-3 text-xs text-zinc-500">
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-800/30 border border-zinc-800/50">
-            <Film size={12} className="text-violet-400" />
-            <span>Video + Photos</span>
-          </div>
-          <ChevronDown size={14} className="text-zinc-700 rotate-[-90deg]" />
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-800/30 border border-zinc-800/50">
-            <Zap size={12} className="text-indigo-400" />
-            <span>15 Stages</span>
-          </div>
-          <ChevronDown size={14} className="text-zinc-700 rotate-[-90deg]" />
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-800/30 border border-zinc-800/50">
-            <Sparkles size={12} className="text-emerald-400" />
-            <span>3D Gaussian Splat</span>
-          </div>
+            );
+          })}
         </div>
 
         {/* Legend */}
-        <div className="mt-6 flex items-center justify-center gap-4 text-[11px] text-zinc-600">
+        <div className="mt-8 pt-6 border-t border-zinc-800/40 flex items-center gap-5 text-xs text-zinc-600">
           <div className="flex items-center gap-1.5">
             <div className="w-2 h-2 rounded-full bg-zinc-700" />
             Pending
           </div>
           <div className="flex items-center gap-1.5">
-            <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
+            <div className="w-2 h-2 rounded-full bg-indigo-500" />
             Active
           </div>
           <div className="flex items-center gap-1.5">
