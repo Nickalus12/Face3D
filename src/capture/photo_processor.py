@@ -211,7 +211,7 @@ def process_photos(
     Returns:
         Tuple of (list of processed photo paths, list of per-photo metadata dicts).
     """
-    from src.utils.parallel import parallel_map
+    from utils.parallel import parallel_map
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

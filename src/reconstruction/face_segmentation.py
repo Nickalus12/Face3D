@@ -379,7 +379,7 @@ class FaceSegmenter:
             List of paths to generated mask files.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        from src.utils.parallel import get_optimal_workers
+        from utils.parallel import get_optimal_workers
 
         frames_dir = Path(frames_dir)
         output_dir = Path(output_dir)

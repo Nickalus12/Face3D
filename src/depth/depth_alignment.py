@@ -1,8 +1,15 @@
-"""Align monocular relative depth maps to metric scale using COLMAP sparse points."""
+"""Align monocular relative depth maps to metric scale using COLMAP sparse points.
+
+Optimizations:
+- Parallel RANSAC alignment using ProcessPoolExecutor
+- Cached alignment parameters: reuse previous frame's scale/shift as initial guess
+  when adjacent frames have similar poses (small rotation delta)
+"""
 
 import logging
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -32,6 +39,7 @@ def _ransac_scale_shift(
     inlier_threshold: float = 0.05,
     min_samples: int = 3,
     rng_seed: Optional[int] = 42,
+    initial_guess: Optional[Tuple[float, float]] = None,
 ) -> Tuple[float, float, np.ndarray]:
     """RANSAC-based robust estimation of scale and shift.
 
@@ -47,6 +55,9 @@ def _ransac_scale_shift(
         inlier_threshold: Absolute residual threshold to count as inlier.
         min_samples: Points sampled per iteration (must be >= 2).
         rng_seed: Random seed for reproducibility.
+        initial_guess: Optional (scale, shift) from a previous frame to use as
+            the first candidate. If provided, the first RANSAC iteration evaluates
+            this guess, giving adjacent frames a head start.
 
     Returns:
         (scale, shift, inlier_mask) where inlier_mask is boolean (N,).
@@ -59,12 +70,22 @@ def _ransac_scale_shift(
     best_inlier_count = 0
     best_inlier_mask = np.zeros(n, dtype=bool)
 
+    # If we have an initial guess from a previous frame, evaluate it first
+    if initial_guess is not None:
+        s_init, b_init = initial_guess
+        residuals = np.abs(s_init * mono_depths + b_init - metric_depths)
+        inlier_mask = residuals < inlier_threshold
+        inlier_count = inlier_mask.sum()
+        if inlier_count > best_inlier_count:
+            best_inlier_count = inlier_count
+            best_s, best_b = s_init, b_init
+            best_inlier_mask = inlier_mask
+
     for _ in range(n_iterations):
         idx = rng.choice(n, size=min_samples, replace=False)
         A_sub = np.column_stack([mono_depths[idx], np.ones(min_samples)])
         b_sub = metric_depths[idx]
 
-        # Optionally apply weights to the subset
         if weights is not None:
             W_sub = np.diag(weights[idx])
             result = np.linalg.lstsq(W_sub @ A_sub, W_sub @ b_sub, rcond=None)
@@ -73,7 +94,6 @@ def _ransac_scale_shift(
 
         s_cand, b_cand = result[0]
 
-        # Count inliers on the full set
         residuals = np.abs(s_cand * mono_depths + b_cand - metric_depths)
         inlier_mask = residuals < inlier_threshold
         inlier_count = inlier_mask.sum()
@@ -111,7 +131,8 @@ def align_depth_to_colmap(
     ransac_inlier_threshold: float = 0.05,
     depth_clamp_min: float = _DEPTH_MIN_DEFAULT,
     depth_clamp_max: float = _DEPTH_MAX_DEFAULT,
-) -> np.ndarray:
+    initial_guess: Optional[Tuple[float, float]] = None,
+) -> Tuple[np.ndarray, float, float]:
     """Align a relative depth map to metric scale using COLMAP sparse points.
 
     Solves for scale *s* and shift *b* that minimize::
@@ -119,12 +140,8 @@ def align_depth_to_colmap(
         ||s * depth_mono + b - depth_colmap||^2
 
     When *use_ransac* is True (default), a RANSAC estimator is used for
-    robustness against outlier correspondences (reflective surfaces,
-    hair, etc.). When a *confidence_map* is provided (e.g. from DA3),
-    high-confidence points receive greater weight in the fit.
-
-    The final aligned depth is clamped to [depth_clamp_min, depth_clamp_max]
-    to remove physically implausible values for face-distance capture.
+    robustness against outlier correspondences. When a *confidence_map*
+    is provided, high-confidence points receive greater weight in the fit.
 
     Args:
         depth_map: (H, W) relative (inverse) depth from monocular estimator.
@@ -132,25 +149,26 @@ def align_depth_to_colmap(
         camera_intrinsics: (3, 3) intrinsics matrix K.
         camera_extrinsics: Tuple of (R, t) where R is (3,3) rotation and
             t is (3,) translation.
-        confidence_map: Optional (H, W) confidence from DA3, values in [0, 1].
-            Used as per-point weights in the alignment.
+        confidence_map: Optional (H, W) confidence from DA3.
         use_ransac: Use RANSAC for robust scale/shift fitting.
         ransac_iterations: Number of RANSAC iterations.
         ransac_inlier_threshold: RANSAC inlier residual threshold (meters).
         depth_clamp_min: Minimum valid depth after alignment (meters).
         depth_clamp_max: Maximum valid depth after alignment (meters).
+        initial_guess: Optional (scale, shift) from adjacent frame alignment.
 
     Returns:
-        (H, W) aligned metric depth map, clamped to valid range.
+        Tuple of (aligned_depth, scale, shift) where aligned_depth is (H, W)
+        aligned metric depth map clamped to valid range, and scale/shift are
+        the fitted parameters (useful for caching).
     """
     R, t = camera_extrinsics
     t = t.ravel()
 
     # Project COLMAP 3D points into camera frame to get metric depth
-    points_cam = (R @ colmap_points_3d.T).T + t  # (N, 3)
-    metric_depths = points_cam[:, 2]  # z-component is depth
+    points_cam = (R @ colmap_points_3d.T).T + t
+    metric_depths = points_cam[:, 2]
 
-    # Filter points with positive depth
     valid = metric_depths > 0
     points_cam = points_cam[valid]
     metric_depths = metric_depths[valid]
@@ -162,7 +180,7 @@ def align_depth_to_colmap(
             "returning unscaled depth",
             len(metric_depths),
         )
-        return depth_map.copy()
+        return depth_map.copy(), 1.0, 0.0
 
     # Project to pixel coordinates to sample monocular depth
     K = camera_intrinsics
@@ -173,7 +191,6 @@ def align_depth_to_colmap(
     px = np.round(pixels[:, 0]).astype(int)
     py = np.round(pixels[:, 1]).astype(int)
 
-    # Keep only points that fall within image bounds
     in_bounds = (px >= 0) & (px < W) & (py >= 0) & (py < H)
     px = px[in_bounds]
     py = py[in_bounds]
@@ -181,12 +198,10 @@ def align_depth_to_colmap(
 
     if len(metric_depths) < 3:
         logger.warning("Too few in-bounds points for alignment (%d)", len(metric_depths))
-        return depth_map.copy()
+        return depth_map.copy(), 1.0, 0.0
 
-    # Sample monocular depth at sparse point locations
     mono_depths = depth_map[py, px]
 
-    # Filter out zero/invalid monocular depth values
     valid_mono = mono_depths > 0
     mono_depths = mono_depths[valid_mono]
     metric_depths = metric_depths[valid_mono]
@@ -195,14 +210,13 @@ def align_depth_to_colmap(
 
     if len(metric_depths) < 3:
         logger.warning("Too few valid mono-depth samples for alignment (%d)", len(metric_depths))
-        return depth_map.copy()
+        return depth_map.copy(), 1.0, 0.0
 
     # Build per-point weights from confidence map if available
     weights = None
     if confidence_map is not None:
         if confidence_map.shape[:2] == (H, W):
             weights = confidence_map[py, px].astype(np.float64)
-            # Avoid zero weights -- floor at a small epsilon
             weights = np.maximum(weights, 1e-6)
             logger.debug("Using confidence weights: min=%.4f, max=%.4f", weights.min(), weights.max())
         else:
@@ -220,6 +234,7 @@ def align_depth_to_colmap(
             weights=weights,
             n_iterations=ransac_iterations,
             inlier_threshold=ransac_inlier_threshold,
+            initial_guess=initial_guess,
         )
         n_inliers = inlier_mask.sum()
         logger.debug(
@@ -227,7 +242,6 @@ def align_depth_to_colmap(
             s, b, n_inliers, len(metric_depths),
         )
     else:
-        # Weighted least squares: W @ A @ x = W @ b
         A = np.column_stack([mono_depths, np.ones_like(mono_depths)])
         if weights is not None:
             W = np.diag(weights)
@@ -260,11 +274,9 @@ def align_depth_to_colmap(
         b = np.clip(b, -100.0, 100.0)
 
     aligned = s * depth_map + b
-
-    # Clamp to physically reasonable range
     aligned = np.clip(aligned, depth_clamp_min, depth_clamp_max)
 
-    return aligned.astype(np.float32)
+    return aligned.astype(np.float32), float(s), float(b)
 
 
 def compute_confidence(
@@ -295,27 +307,118 @@ def compute_confidence(
     px, py = px[in_bounds], py[in_bounds]
     colmap_depths = colmap_depths[in_bounds]
 
-    # Compute residuals at sparse points
     aligned_at_sparse = aligned_depth[py, px]
     residuals = np.abs(aligned_at_sparse - colmap_depths)
 
     if len(residuals) == 0 or np.median(residuals) == 0:
         return np.ones((H, W), dtype=np.float32)
 
-    # Use median absolute residual as uncertainty reference
     median_res = np.median(residuals)
 
-    # Per-pixel confidence: higher when depth is smooth and within expected range
-    # Use gradient magnitude as a proxy for uncertainty
     grad_x = np.gradient(aligned_depth, axis=1)
     grad_y = np.gradient(aligned_depth, axis=0)
     grad_mag = np.sqrt(grad_x**2 + grad_y**2)
 
-    # Normalize gradient magnitude relative to median residual
     confidence = np.exp(-grad_mag / (median_res + 1e-8))
     confidence = np.clip(confidence, 0.0, 1.0)
 
     return confidence.astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Worker function for parallel RANSAC alignment
+# ---------------------------------------------------------------------------
+
+def _align_single_frame(
+    stem: str,
+    depth_path: str,
+    ext_conf_path: Optional[str],
+    colmap_pts: np.ndarray,
+    K: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    use_ransac: bool,
+    ransac_iterations: int,
+    ransac_inlier_threshold: float,
+    depth_clamp_min: float,
+    depth_clamp_max: float,
+    initial_guess: Optional[Tuple[float, float]],
+) -> Optional[dict]:
+    """Align a single frame's depth map (designed to run in a worker process).
+
+    Args:
+        stem: Frame stem name.
+        depth_path: Path to the .npy depth file.
+        ext_conf_path: Optional path to external confidence .npy.
+        colmap_pts: (N, 3) COLMAP 3D points visible in this frame.
+        K: (3, 3) intrinsics matrix.
+        R: (3, 3) rotation matrix.
+        t: (3,) translation vector.
+        use_ransac: Whether to use RANSAC.
+        ransac_iterations: Number of RANSAC iterations.
+        ransac_inlier_threshold: RANSAC threshold.
+        depth_clamp_min: Min depth clamp.
+        depth_clamp_max: Max depth clamp.
+        initial_guess: Optional (scale, shift) from adjacent frame.
+
+    Returns:
+        Dict with 'aligned', 'confidence', 'scale', 'shift', 'stem',
+        or None on failure.
+    """
+    try:
+        depth_map = np.load(depth_path)
+
+        ext_confidence = None
+        if ext_conf_path is not None:
+            ext_confidence = np.load(ext_conf_path).astype(np.float64)
+
+        aligned, scale, shift = align_depth_to_colmap(
+            depth_map,
+            colmap_pts,
+            K,
+            (R, t),
+            confidence_map=ext_confidence,
+            use_ransac=use_ransac,
+            ransac_iterations=ransac_iterations,
+            ransac_inlier_threshold=ransac_inlier_threshold,
+            depth_clamp_min=depth_clamp_min,
+            depth_clamp_max=depth_clamp_max,
+            initial_guess=initial_guess,
+        )
+
+        # Compute confidence
+        pts_cam = (R @ colmap_pts.T).T + t.ravel()
+        metric_depths = pts_cam[:, 2]
+        pts_proj = (K @ pts_cam.T).T
+        pixel_coords = pts_proj[:, :2] / pts_proj[:, 2:3]
+        valid = metric_depths > 0
+        confidence = compute_confidence(
+            depth_map, aligned, metric_depths[valid], pixel_coords[valid]
+        )
+
+        return {
+            "stem": stem,
+            "aligned": aligned,
+            "confidence": confidence,
+            "scale": scale,
+            "shift": shift,
+        }
+    except Exception as e:
+        # Log will not work in subprocess; caller handles this
+        return {"stem": stem, "error": str(e)}
+
+
+def _rotation_delta(qvec_a: np.ndarray, qvec_b: np.ndarray) -> float:
+    """Compute angular difference between two quaternions in degrees.
+
+    Used to determine if adjacent frames have similar poses and thus
+    can share alignment parameters as initial guess.
+    """
+    # Quaternion dot product gives cos(theta/2)
+    dot = abs(np.dot(qvec_a, qvec_b))
+    dot = min(dot, 1.0)
+    angle_rad = 2.0 * np.arccos(dot)
+    return np.degrees(angle_rad)
 
 
 def batch_align(
@@ -328,8 +431,13 @@ def batch_align(
     depth_clamp_min: float = _DEPTH_MIN_DEFAULT,
     depth_clamp_max: float = _DEPTH_MAX_DEFAULT,
     confidence_dir: Optional[Path] = None,
+    max_workers: int = 4,
+    cache_pose_threshold_deg: float = 5.0,
 ) -> None:
     """Align all depth maps in a directory using a COLMAP sparse model.
+
+    Now supports parallel RANSAC alignment via ProcessPoolExecutor and
+    caching alignment parameters between adjacent frames with similar poses.
 
     Args:
         depth_dir: Directory containing .npy depth maps (named by image stem).
@@ -341,7 +449,11 @@ def batch_align(
         depth_clamp_min: Minimum depth clamp (meters).
         depth_clamp_max: Maximum depth clamp (meters).
         confidence_dir: Optional directory with DA3 confidence maps (.npy, same stems).
-            If provided, confidence values are used as weights during alignment.
+        max_workers: Maximum parallel workers for RANSAC alignment.
+            Set to 1 to disable parallelism. Note: each worker loads depth maps,
+            so memory scales with max_workers.
+        cache_pose_threshold_deg: Maximum rotation delta (degrees) between adjacent
+            frames to reuse alignment parameters as initial guess.
     """
     from tqdm import tqdm
 
@@ -363,7 +475,6 @@ def batch_align(
             "Copying raw depth maps as-is without alignment.",
             colmap_model_dir, cameras_bin.exists(), images_bin.exists(),
         )
-        # Copy raw depth maps without alignment
         import shutil
         depth_files = sorted(depth_dir.glob("*.npy"))
         for df in depth_files:
@@ -413,85 +524,204 @@ def batch_align(
     skipped_count = 0
     copy_count = 0
 
-    for image in tqdm(images.values(), desc="Aligning depth maps"):
-        stem = Path(image.name).stem
-        depth_path = depth_dir / f"{stem}.npy"
-        out_path = output_dir / f"{stem}.npy"
-        conf_path = output_dir / f"{stem}_confidence.npy"
+    # Sort images by name for consistent ordering (enables pose caching)
+    sorted_images = sorted(images.values(), key=lambda im: im.name)
 
-        if out_path.exists() and conf_path.exists():
-            skipped_count += 1
-            continue
+    # Determine if we should use parallel or sequential processing
+    # Sequential is preferred when we want to use cached scale/shift from adjacent frames
+    use_parallel = max_workers > 1 and len(sorted_images) > 10
 
-        if not depth_path.exists():
-            logger.debug("No depth map for %s, skipping", image.name)
-            continue
+    if use_parallel:
+        logger.info("Using parallel RANSAC alignment with %d workers", max_workers)
+        # For parallel mode, we first do a sequential pass to identify which frames
+        # need processing and prepare their data, then run RANSAC in parallel.
+        tasks = []
+        for image in sorted_images:
+            stem = Path(image.name).stem
+            depth_path = depth_dir / f"{stem}.npy"
+            out_path = output_dir / f"{stem}.npy"
+            conf_path = output_dir / f"{stem}_confidence.npy"
 
-        depth_map = np.load(str(depth_path))
+            if out_path.exists() and conf_path.exists():
+                skipped_count += 1
+                continue
 
-        # Load external confidence map (e.g. from DA3) if available
-        ext_confidence = None
-        if confidence_dir is not None:
-            ext_conf_path = confidence_dir / f"{stem}.npy"
-            if ext_conf_path.exists():
-                ext_confidence = np.load(str(ext_conf_path)).astype(np.float64)
+            if not depth_path.exists():
+                continue
 
-        # Gather COLMAP 3D points visible in this image
-        visible_mask = image.point3D_ids >= 0
-        visible_p3d_ids = image.point3D_ids[visible_mask]
-        visible_xys = image.xys[visible_mask]
+            # Gather COLMAP 3D points visible in this image
+            visible_mask = image.point3D_ids >= 0
+            visible_p3d_ids = image.point3D_ids[visible_mask]
 
-        colmap_pts = []
-        for p3d_id in visible_p3d_ids:
-            if p3d_id in p3d_xyz:
-                colmap_pts.append(p3d_xyz[p3d_id])
+            colmap_pts = []
+            for p3d_id in visible_p3d_ids:
+                if p3d_id in p3d_xyz:
+                    colmap_pts.append(p3d_xyz[p3d_id])
 
-        if len(colmap_pts) < 3:
-            logger.warning(
-                "Image %s: only %d sparse points, copying unaligned depth as output",
-                image.name, len(colmap_pts),
+            if len(colmap_pts) < 3:
+                # Not enough points — copy unaligned
+                depth_map = np.load(str(depth_path))
+                np.save(str(out_path), depth_map)
+                np.save(str(conf_path), np.ones_like(depth_map, dtype=np.float32) * 0.3)
+                copy_count += 1
+                continue
+
+            colmap_pts_arr = np.array(colmap_pts, dtype=np.float64)
+            camera = cameras[image.camera_id]
+            K = get_intrinsics_matrix(camera)
+            R = qvec_to_rotmat(image.qvec)
+            t = image.tvec
+
+            ext_conf_path = None
+            if confidence_dir is not None:
+                ecp = confidence_dir / f"{stem}.npy"
+                if ecp.exists():
+                    ext_conf_path = str(ecp)
+
+            tasks.append({
+                "stem": stem,
+                "depth_path": str(depth_path),
+                "ext_conf_path": ext_conf_path,
+                "colmap_pts": colmap_pts_arr,
+                "K": K,
+                "R": R,
+                "t": t,
+            })
+
+        # Run alignment in parallel (no initial guess in parallel mode)
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for task in tasks:
+                fut = executor.submit(
+                    _align_single_frame,
+                    task["stem"],
+                    task["depth_path"],
+                    task["ext_conf_path"],
+                    task["colmap_pts"],
+                    task["K"],
+                    task["R"],
+                    task["t"],
+                    use_ransac,
+                    ransac_iterations,
+                    ransac_inlier_threshold,
+                    depth_clamp_min,
+                    depth_clamp_max,
+                    None,  # no initial guess in parallel mode
+                )
+                futures[fut] = task["stem"]
+
+            for fut in tqdm(as_completed(futures), total=len(futures), desc="Aligning depth maps (parallel)"):
+                stem = futures[fut]
+                result = fut.result()
+                if result is None:
+                    logger.warning("Alignment returned None for %s", stem)
+                    continue
+                if "error" in result:
+                    logger.warning("Alignment failed for %s: %s", stem, result["error"])
+                    continue
+
+                out_path = output_dir / f"{result['stem']}.npy"
+                conf_path = output_dir / f"{result['stem']}_confidence.npy"
+                np.save(str(out_path), result["aligned"])
+                np.save(str(conf_path), result["confidence"])
+                aligned_count += 1
+
+    else:
+        # Sequential mode with cached scale/shift from adjacent frames
+        logger.info("Using sequential alignment with pose-based parameter caching")
+        prev_scale_shift = None
+        prev_qvec = None
+
+        for image in tqdm(sorted_images, desc="Aligning depth maps"):
+            stem = Path(image.name).stem
+            depth_path = depth_dir / f"{stem}.npy"
+            out_path = output_dir / f"{stem}.npy"
+            conf_path = output_dir / f"{stem}_confidence.npy"
+
+            if out_path.exists() and conf_path.exists():
+                skipped_count += 1
+                continue
+
+            if not depth_path.exists():
+                logger.debug("No depth map for %s, skipping", image.name)
+                continue
+
+            depth_map = np.load(str(depth_path))
+
+            ext_confidence = None
+            if confidence_dir is not None:
+                ext_conf_path = confidence_dir / f"{stem}.npy"
+                if ext_conf_path.exists():
+                    ext_confidence = np.load(str(ext_conf_path)).astype(np.float64)
+
+            # Gather COLMAP 3D points visible in this image
+            visible_mask = image.point3D_ids >= 0
+            visible_p3d_ids = image.point3D_ids[visible_mask]
+
+            colmap_pts = []
+            for p3d_id in visible_p3d_ids:
+                if p3d_id in p3d_xyz:
+                    colmap_pts.append(p3d_xyz[p3d_id])
+
+            if len(colmap_pts) < 3:
+                logger.warning(
+                    "Image %s: only %d sparse points, copying unaligned depth as output",
+                    image.name, len(colmap_pts),
+                )
+                np.save(str(out_path), depth_map)
+                np.save(str(conf_path), np.ones_like(depth_map, dtype=np.float32) * 0.3)
+                copy_count += 1
+                continue
+
+            colmap_pts = np.array(colmap_pts, dtype=np.float64)
+
+            camera = cameras[image.camera_id]
+            K = get_intrinsics_matrix(camera)
+            R = qvec_to_rotmat(image.qvec)
+            t = image.tvec
+
+            # Determine initial guess from previous frame if poses are similar
+            initial_guess = None
+            if prev_scale_shift is not None and prev_qvec is not None:
+                rot_delta = _rotation_delta(prev_qvec, image.qvec)
+                if rot_delta < cache_pose_threshold_deg:
+                    initial_guess = prev_scale_shift
+                    logger.debug(
+                        "Frame %s: reusing previous scale/shift (rot_delta=%.1f deg < %.1f)",
+                        image.name, rot_delta, cache_pose_threshold_deg,
+                    )
+
+            aligned, scale, shift = align_depth_to_colmap(
+                depth_map,
+                colmap_pts,
+                K,
+                (R, t),
+                confidence_map=ext_confidence,
+                use_ransac=use_ransac,
+                ransac_iterations=ransac_iterations,
+                ransac_inlier_threshold=ransac_inlier_threshold,
+                depth_clamp_min=depth_clamp_min,
+                depth_clamp_max=depth_clamp_max,
+                initial_guess=initial_guess,
             )
-            # Write unaligned depth copy so downstream stages have a file for every frame
-            np.save(str(out_path), depth_map)
-            np.save(str(conf_path), np.ones_like(depth_map, dtype=np.float32) * 0.3)
-            copy_count += 1
-            continue
 
-        colmap_pts = np.array(colmap_pts, dtype=np.float64)
+            # Cache scale/shift and qvec for next frame
+            prev_scale_shift = (scale, shift)
+            prev_qvec = image.qvec
 
-        # Camera parameters
-        camera = cameras[image.camera_id]
-        K = get_intrinsics_matrix(camera)
-        R = qvec_to_rotmat(image.qvec)
-        t = image.tvec
+            # Compute confidence
+            pts_cam = (R @ colmap_pts.T).T + t.ravel()
+            metric_depths = pts_cam[:, 2]
+            pts_proj = (K @ pts_cam.T).T
+            pixel_coords = pts_proj[:, :2] / pts_proj[:, 2:3]
+            valid = metric_depths > 0
+            confidence = compute_confidence(
+                depth_map, aligned, metric_depths[valid], pixel_coords[valid]
+            )
 
-        # Align with RANSAC and optional confidence weighting
-        aligned = align_depth_to_colmap(
-            depth_map,
-            colmap_pts,
-            K,
-            (R, t),
-            confidence_map=ext_confidence,
-            use_ransac=use_ransac,
-            ransac_iterations=ransac_iterations,
-            ransac_inlier_threshold=ransac_inlier_threshold,
-            depth_clamp_min=depth_clamp_min,
-            depth_clamp_max=depth_clamp_max,
-        )
-
-        # Compute confidence
-        pts_cam = (R @ colmap_pts.T).T + t.ravel()
-        metric_depths = pts_cam[:, 2]
-        pts_proj = (K @ pts_cam.T).T
-        pixel_coords = pts_proj[:, :2] / pts_proj[:, 2:3]
-        valid = metric_depths > 0
-        confidence = compute_confidence(
-            depth_map, aligned, metric_depths[valid], pixel_coords[valid]
-        )
-
-        np.save(str(out_path), aligned)
-        np.save(str(conf_path), confidence)
-        aligned_count += 1
+            np.save(str(out_path), aligned)
+            np.save(str(conf_path), confidence)
+            aligned_count += 1
 
     logger.info(
         "Alignment complete: %d aligned, %d copied (0 COLMAP pts), %d skipped (cached)",

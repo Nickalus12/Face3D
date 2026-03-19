@@ -280,7 +280,7 @@ def batch_color_correct(
     )
 
     # Build per-frame work items for parallel processing
-    from src.utils.parallel import parallel_map, get_optimal_workers
+    from utils.parallel import parallel_map, get_optimal_workers
 
     def _process_single_frame(frame_path: Path) -> Path | None:
         """Process a single frame (LOG -> sRGB). Runs in a worker process."""

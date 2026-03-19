@@ -693,7 +693,7 @@ def _record_da2_fallback_frame(
 
     # Try DA2 inline if available
     try:
-        from src.depth.depth_estimator import DepthEstimator
+        from depth.depth_estimator import DepthEstimator
         estimator = DepthEstimator(model_type="v2")
         da2_result = estimator.estimate(str(fpath))
         if da2_result is not None:

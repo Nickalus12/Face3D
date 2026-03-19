@@ -334,7 +334,7 @@ def filter_frames(
 
     # --- Quick mode: parallel blur+exposure checks (no MediaPipe) ---
     if quick_mode:
-        from src.utils.parallel import parallel_map
+        from utils.parallel import parallel_map
 
         def _check_frame_quick(frame_path: Path) -> dict:
             """Blur + exposure check for a single frame (process-safe)."""
