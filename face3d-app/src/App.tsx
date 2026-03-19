@@ -159,7 +159,9 @@ export default function App() {
   }, [selectSession]);
 
   // Determine if we should show the welcome screen
-  const showWelcome = !currentSession && !isLoading;
+  // Only show welcome on 'home' view when no session selected
+  // Other views (gallery, metrics, pipeline, settings) should always render
+  const showWelcome = !currentSession && !isLoading && (activeView === 'home' || activeView === 'view');
 
   return (
     <div className="flex flex-col h-screen w-screen bg-surface text-zinc-300 font-sans overflow-hidden selection:bg-indigo-500/30 noise-overlay">
