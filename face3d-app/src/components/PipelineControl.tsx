@@ -1,4 +1,3 @@
-import { open } from "@tauri-apps/plugin-dialog";
 import {
   Play,
   Square,
@@ -7,11 +6,12 @@ import {
 } from "lucide-react";
 import usePipelineStore from "../store/pipelineStore";
 import useSessionStore from "../store/sessionStore";
+import { selectContentDir } from "../lib/tauri";
 import { clsx } from "clsx";
 
 export default function PipelineControl() {
   const {
-    isRunning,
+    status,
     currentStage,
     stages,
     contentDir,
@@ -24,29 +24,24 @@ export default function PipelineControl() {
 
   const { createSession } = useSessionStore();
 
+  const isRunning = status === "running" || status === "stopping";
   const completedStages = stages.filter((s) => s.status === "complete").length;
   const progress = Math.round((completedStages / stages.length) * 100);
 
   async function handlePickDirectory() {
-    try {
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: "Select Content Directory",
-      });
-      if (selected && typeof selected === "string") {
-        setContentDir(selected);
-      }
-    } catch {
-      // User cancelled or dialog unavailable in dev
+    const dir = await selectContentDir();
+    if (dir) {
+      setContentDir(dir);
     }
   }
 
   async function handleStart() {
+    if (!contentDir) return;
+    const name = sessionName.trim() || `session_${Date.now()}`;
     if (sessionName.trim()) {
-      createSession(sessionName.trim(), contentDir);
+      createSession(name, contentDir);
     }
-    await startPipeline();
+    await startPipeline(contentDir, name);
   }
 
   return (
@@ -103,7 +98,7 @@ export default function PipelineControl() {
               <span className="text-zinc-400">
                 Stage {currentStage}/14
                 {stages[currentStage - 1] &&
-                  ` — ${stages[currentStage - 1].name}`}
+                  ` -- ${stages[currentStage - 1].name}`}
               </span>
               <span className="text-emerald-400 font-medium">{progress}%</span>
             </div>

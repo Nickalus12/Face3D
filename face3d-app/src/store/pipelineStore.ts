@@ -2,25 +2,29 @@ import { create } from "zustand";
 import {
   startPipeline as tauriStartPipeline,
   stopPipeline as tauriStopPipeline,
+  getGpuInfo as tauriGetGpuInfo,
+  type GpuInfo,
 } from "../lib/tauri";
+
+// ── Types ────────────────────────────────────────────────────────
 
 export interface StageStatus {
   id: number;
   name: string;
   status: "pending" | "running" | "complete" | "error" | "skipped";
-  duration?: number;
+  elapsed?: number;
 }
 
 export interface LogEntry {
   timestamp: string;
-  level: "INFO" | "WARN" | "ERROR" | "DEBUG";
+  level: "info" | "warn" | "error" | "stderr" | "debug";
   message: string;
 }
 
 export interface MetricPoint {
-  iteration: number;
-  psnr?: number;
+  iter: number;
   loss?: number;
+  psnr?: number;
   gaussians?: number;
 }
 
@@ -41,110 +45,246 @@ const PIPELINE_STAGES: { id: number; name: string }[] = [
   { id: 14, name: "Export & Render" },
 ];
 
+export { PIPELINE_STAGES };
+
+// ── Store ────────────────────────────────────────────────────────
+
 interface PipelineState {
-  stages: StageStatus[];
-  isRunning: boolean;
+  status: "idle" | "running" | "stopping" | "complete" | "error";
   currentStage: number;
+  stages: StageStatus[];
   logs: LogEntry[];
   metrics: MetricPoint[];
+  gpuInfo: GpuInfo | null;
   contentDir: string;
   sessionName: string;
+  startedAt: number | null;
 
+  // Actions
   setContentDir: (dir: string) => void;
   setSessionName: (name: string) => void;
-  startPipeline: () => Promise<void>;
+  startPipeline: (contentDir: string, session: string) => Promise<void>;
   stopPipeline: () => Promise<void>;
-  addLog: (level: LogEntry["level"], message: string) => void;
-  addMetric: (point: MetricPoint) => void;
+  fetchGpuInfo: () => Promise<void>;
+  addLog: (line: string, level: string) => void;
+  parseLogLine: (line: string, level: string) => void;
   clearLogs: () => void;
-  updateStage: (id: number, status: StageStatus["status"]) => void;
-  setCurrentStage: (stage: number) => void;
+  resetPipeline: () => void;
+  onPipelineComplete: (exitCode: number) => void;
 }
 
+const MAX_LOG_LINES = 1000;
+
 const usePipelineStore = create<PipelineState>((set, get) => ({
-  stages: PIPELINE_STAGES.map((s) => ({ ...s, status: "pending" as const })),
-  isRunning: false,
+  status: "idle",
   currentStage: 0,
+  stages: PIPELINE_STAGES.map((s) => ({ ...s, status: "pending" as const })),
   logs: [],
   metrics: [],
+  gpuInfo: null,
   contentDir: "",
   sessionName: "",
+  startedAt: null,
 
-  setContentDir: (dir: string) => set({ contentDir: dir }),
-  setSessionName: (name: string) => set({ sessionName: name }),
+  setContentDir: (dir) => set({ contentDir: dir }),
+  setSessionName: (name) => set({ sessionName: name }),
 
-  startPipeline: async () => {
-    const { contentDir, sessionName } = get();
-    if (!contentDir) {
-      get().addLog("ERROR", "No content directory selected");
-      return;
-    }
-
+  startPipeline: async (contentDir: string, session: string) => {
     set({
-      isRunning: true,
+      status: "running",
       currentStage: 1,
       stages: PIPELINE_STAGES.map((s) => ({
         ...s,
         status: "pending" as const,
       })),
       metrics: [],
+      logs: [],
+      startedAt: Date.now(),
+      contentDir,
+      sessionName: session,
     });
 
-    get().addLog("INFO", `Starting pipeline for session: ${sessionName || "unnamed"}`);
-    get().addLog("INFO", `Content directory: ${contentDir}`);
-    get().updateStage(1, "running");
+    get().addLog(`Starting pipeline for session: ${session}`, "info");
+    get().addLog(`Content directory: ${contentDir}`, "info");
+
+    // Mark stage 1 as running
+    set((state) => ({
+      stages: state.stages.map((s) =>
+        s.id === 1 ? { ...s, status: "running" as const } : s,
+      ),
+    }));
 
     try {
-      await tauriStartPipeline(contentDir, sessionName);
+      await tauriStartPipeline(contentDir, session);
     } catch (e) {
-      get().addLog(
-        "ERROR",
-        `Pipeline start failed: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      const msg = e instanceof Error ? e.message : String(e);
+      get().addLog(`Pipeline start failed: ${msg}`, "error");
+      set({ status: "error" });
     }
   },
 
   stopPipeline: async () => {
-    get().addLog("WARN", "Pipeline stop requested");
+    set({ status: "stopping" });
+    get().addLog("Pipeline stop requested", "warn");
     try {
       await tauriStopPipeline();
     } catch {
-      // Handled in dev mode
+      // May fail if not running
     }
     const { currentStage } = get();
     set((state) => ({
-      isRunning: false,
+      status: "idle",
       stages: state.stages.map((s) =>
         s.id === currentStage && s.status === "running"
           ? { ...s, status: "error" as const }
           : s,
       ),
     }));
-    get().addLog("WARN", "Pipeline stopped");
+    get().addLog("Pipeline stopped by user", "warn");
   },
 
-  addLog: (level, message) => {
+  fetchGpuInfo: async () => {
+    const info = await tauriGetGpuInfo();
+    if (info) {
+      set({ gpuInfo: info });
+    }
+  },
+
+  addLog: (line: string, level: string) => {
     const entry: LogEntry = {
       timestamp: new Date().toISOString().slice(11, 23),
-      level,
-      message,
+      level: level as LogEntry["level"],
+      message: line,
     };
-    set((state) => ({ logs: [...state.logs, entry] }));
+    set((state) => {
+      const logs = [...state.logs, entry];
+      // Keep only the last MAX_LOG_LINES
+      if (logs.length > MAX_LOG_LINES) {
+        return { logs: logs.slice(logs.length - MAX_LOG_LINES) };
+      }
+      return { logs };
+    });
   },
 
-  addMetric: (point) => {
-    set((state) => ({ metrics: [...state.metrics, point] }));
+  parseLogLine: (line: string, level: string) => {
+    const state = get();
+
+    // Always add the log
+    state.addLog(line, level);
+
+    // Detect stage transitions: "Stage N completed" or "=== Stage N:"
+    const stageCompleteMatch = line.match(
+      /Stage\s+(\d+)\s+completed/i,
+    );
+    if (stageCompleteMatch) {
+      const completedStage = parseInt(stageCompleteMatch[1], 10);
+      const nextStage = completedStage + 1;
+      set((s) => ({
+        currentStage: nextStage <= 14 ? nextStage : completedStage,
+        stages: s.stages.map((st) => {
+          if (st.id === completedStage)
+            return { ...st, status: "complete" as const };
+          if (st.id === nextStage && nextStage <= 14)
+            return { ...st, status: "running" as const };
+          return st;
+        }),
+      }));
+      return;
+    }
+
+    // Detect stage start: "=== Stage N:" or "Running stage N"
+    const stageStartMatch = line.match(
+      /(?:===\s*Stage|Running\s+stage)\s+(\d+)/i,
+    );
+    if (stageStartMatch) {
+      const stageNum = parseInt(stageStartMatch[1], 10);
+      set((s) => ({
+        currentStage: stageNum,
+        stages: s.stages.map((st) => {
+          if (st.id === stageNum)
+            return { ...st, status: "running" as const };
+          // Mark all previous stages as complete if still pending/running
+          if (st.id < stageNum && st.status !== "error" && st.status !== "skipped")
+            return { ...st, status: "complete" as const };
+          return st;
+        }),
+      }));
+      return;
+    }
+
+    // Detect training metrics: "loss=X.XXX" or "psnr=X.XX" or "n_gs=NNNN"
+    const lossMatch = line.match(/loss[=:]\s*([\d.]+)/i);
+    const psnrMatch = line.match(/psnr[=:]\s*([\d.]+)/i);
+    const gsMatch = line.match(/n_gs[=:]\s*([\d,]+)/i);
+    const iterMatch = line.match(/(?:iter|iteration|step)[=:\s]*(\d+)/i);
+
+    if (lossMatch || psnrMatch || gsMatch) {
+      const point: MetricPoint = {
+        iter: iterMatch
+          ? parseInt(iterMatch[1], 10)
+          : state.metrics.length,
+        loss: lossMatch ? parseFloat(lossMatch[1]) : undefined,
+        psnr: psnrMatch ? parseFloat(psnrMatch[1]) : undefined,
+        gaussians: gsMatch
+          ? parseInt(gsMatch[1].replace(/,/g, ""), 10)
+          : undefined,
+      };
+      set((s) => ({ metrics: [...s.metrics, point] }));
+    }
+
+    // Detect errors
+    if (level === "error" || line.includes("[ERROR]")) {
+      set({ status: "error" });
+    }
+
+    // Detect pipeline completion
+    if (/pipeline\s+complete/i.test(line)) {
+      set((s) => ({
+        status: "complete",
+        stages: s.stages.map((st) =>
+          st.status === "running" || st.status === "pending"
+            ? { ...st, status: "complete" as const }
+            : st,
+        ),
+      }));
+    }
   },
 
   clearLogs: () => set({ logs: [] }),
 
-  updateStage: (id, status) => {
-    set((state) => ({
-      stages: state.stages.map((s) => (s.id === id ? { ...s, status } : s)),
-    }));
-  },
+  resetPipeline: () =>
+    set({
+      status: "idle",
+      currentStage: 0,
+      stages: PIPELINE_STAGES.map((s) => ({
+        ...s,
+        status: "pending" as const,
+      })),
+      logs: [],
+      metrics: [],
+      startedAt: null,
+    }),
 
-  setCurrentStage: (stage) => set({ currentStage: stage }),
+  onPipelineComplete: (exitCode: number) => {
+    const state = get();
+    if (exitCode === 0) {
+      set((s) => ({
+        status: "complete",
+        stages: s.stages.map((st) =>
+          st.status === "running" || st.status === "pending"
+            ? { ...st, status: "complete" as const }
+            : st,
+        ),
+      }));
+      state.addLog("Pipeline completed successfully", "info");
+    } else {
+      set({ status: "error" });
+      state.addLog(
+        `Pipeline exited with code ${exitCode}`,
+        "error",
+      );
+    }
+  },
 }));
 
 export default usePipelineStore;
