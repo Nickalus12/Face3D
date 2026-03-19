@@ -191,6 +191,7 @@ def process_photos(
     photo_paths: list[str | Path],
     output_dir: str | Path,
     target_colorspace: str = "srgb",
+    max_workers: int | None = None,
 ) -> tuple[list[Path], list[dict]]:
     """Process Expert RAW photos for integration into the Face3D pipeline.
 
@@ -203,73 +204,69 @@ def process_photos(
         output_dir: Directory for processed output images.
         target_colorspace: Target color space ("srgb").
 
+        max_workers: Number of parallel worker processes for photo
+            processing. Each photo is independent (rawpy is process-safe).
+            Defaults to ``cpu_count - 1``.
+
     Returns:
         Tuple of (list of processed photo paths, list of per-photo metadata dicts).
     """
+    from src.utils.parallel import parallel_map
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    processed_paths: list[Path] = []
-    all_metadata: list[dict] = []
+    # Build indexed work items so output names are deterministic
+    work_items: list[tuple[int, Path]] = []
+    for i, pp in enumerate(photo_paths):
+        pp = Path(pp)
+        if pp.is_file():
+            work_items.append((i, pp))
+        else:
+            logger.warning("Photo not found, skipping: %s", pp)
 
-    for i, photo_path in enumerate(photo_paths):
-        photo_path = Path(photo_path)
-        if not photo_path.is_file():
-            logger.warning("Photo not found, skipping: %s", photo_path)
-            continue
-
+    def _process_single_photo(item: tuple[int, Path]) -> tuple[Path, dict] | None:
+        """Process one photo file. Safe for ProcessPoolExecutor."""
+        i, photo_path = item
         suffix = photo_path.suffix.lower()
-        logger.info("Processing photo %d/%d: %s", i + 1, len(photo_paths), photo_path.name)
 
-        # Extract EXIF before processing
         exif = _extract_exif_pillow(photo_path)
 
         try:
             if suffix == ".dng":
-                # RAW processing with rawpy
                 image, bps = _process_dng(photo_path)
                 out_name = f"photo_{i:04d}.png"
             elif suffix in (".jpg", ".jpeg", ".png", ".tif", ".tiff"):
-                # Read with OpenCV
                 if suffix in (".tif", ".tiff"):
                     image = cv2.imread(str(photo_path), cv2.IMREAD_UNCHANGED)
                 else:
                     image = cv2.imread(str(photo_path), cv2.IMREAD_COLOR)
 
                 if image is None:
-                    logger.warning("Failed to read photo: %s", photo_path)
-                    continue
+                    return None
 
-                # Convert BGR to RGB for auto-rotation, then back
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 bps = 16 if image.dtype == np.uint16 else 8
                 out_name = f"photo_{i:04d}.png"
             else:
-                logger.warning("Unsupported photo format: %s", suffix)
-                continue
+                return None
 
             # Auto-rotate based on EXIF orientation
             orientation = exif.get("orientation", 1)
             if orientation and orientation != 1:
                 image = _auto_rotate(image, orientation)
-                logger.debug("Auto-rotated photo %s (orientation=%d)", photo_path.name, orientation)
-                # Update dimensions after rotation
                 exif["width"] = image.shape[1]
                 exif["height"] = image.shape[0]
 
             # Convert RGB back to BGR for cv2.imwrite
             image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-            # Save as PNG
             out_path = output_dir / out_name
             if bps == 16:
                 cv2.imwrite(str(out_path), image_bgr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
             else:
                 cv2.imwrite(str(out_path), image_bgr)
 
-            processed_paths.append(out_path)
-
-            # Build metadata entry
             meta = {
                 "source_file": str(photo_path),
                 "output_file": str(out_path),
@@ -279,18 +276,27 @@ def process_photos(
                 "is_photo": True,
                 **exif,
             }
+            return out_path, meta
+
+        except Exception:
+            return None
+
+    results = parallel_map(
+        _process_single_photo,
+        work_items,
+        max_workers=max_workers,
+        desc="Processing photos",
+        use_threads=False,
+    )
+
+    processed_paths: list[Path] = []
+    all_metadata: list[dict] = []
+
+    for result in results:
+        if result is not None:
+            out_path, meta = result
+            processed_paths.append(out_path)
             all_metadata.append(meta)
-
-            logger.info(
-                "  -> %s (%dx%d, %dbit, focal=%s, focal35=%s, iso=%s)",
-                out_name, exif.get("width", 0), exif.get("height", 0),
-                bps, exif.get("focal_length"), exif.get("focal_length_35mm"),
-                exif.get("iso"),
-            )
-
-        except Exception as e:
-            logger.error("Failed to process photo %s: %s", photo_path, e)
-            continue
 
     # Save metadata JSON
     meta_path = output_dir / "photo_metadata.json"

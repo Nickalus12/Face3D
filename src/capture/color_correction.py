@@ -200,6 +200,7 @@ def batch_color_correct(
     output_linear_dir: str | Path | None = None,
     log_type: str = "slog3",
     is_log: bool = True,
+    max_workers: int | None = None,
 ) -> list[Path]:
     """Process all frames in a directory: LOG -> linear -> sRGB.
 
@@ -226,6 +227,8 @@ def batch_color_correct(
         log_type: LOG curve identifier (default ``"slog3"``).
         is_log: Whether the input frames are actually LOG-encoded.
             When ``False``, frames are copied directly.
+        max_workers: Number of parallel worker processes for color
+            correction. Defaults to ``cpu_count - 1``.
 
     Returns:
         List of paths to the sRGB output frames.
@@ -276,13 +279,14 @@ def batch_color_correct(
         "Batch color correction: %d frames, log_type=%s", len(frame_files), log_type
     )
 
-    srgb_paths = []
+    # Build per-frame work items for parallel processing
+    from src.utils.parallel import parallel_map, get_optimal_workers
 
-    for i, frame_path in enumerate(frame_files):
+    def _process_single_frame(frame_path: Path) -> Path | None:
+        """Process a single frame (LOG -> sRGB). Runs in a worker process."""
         img = cv2.imread(str(frame_path), cv2.IMREAD_UNCHANGED)
         if img is None:
-            logger.warning("Skipping unreadable file: %s", frame_path)
-            continue
+            return None
 
         srgb_path = output_srgb_dir / frame_path.with_suffix(".png").name
 
@@ -290,10 +294,7 @@ def batch_color_correct(
         if log_type == "slog3" and img.dtype == np.uint8 and output_linear_dir is None:
             srgb = _slog3_to_srgb_lut_8bit(img)
             cv2.imwrite(str(srgb_path), srgb)
-            srgb_paths.append(srgb_path)
-            if (i + 1) % 50 == 0:
-                logger.info("Processed %d / %d frames (LUT fast path)", i + 1, len(frame_files))
-            continue
+            return srgb_path
 
         # --- General float path (16-bit inputs or when linear output needed) ---
         # Normalize to float [0, 1]
@@ -332,10 +333,17 @@ def batch_color_correct(
 
         srgb = linear_to_srgb(linear_for_srgb)
         cv2.imwrite(str(srgb_path), srgb)
-        srgb_paths.append(srgb_path)
+        return srgb_path
 
-        if (i + 1) % 50 == 0:
-            logger.info("Processed %d / %d frames", i + 1, len(frame_files))
+    results = parallel_map(
+        _process_single_frame,
+        frame_files,
+        max_workers=max_workers,
+        desc="Color correction",
+        use_threads=False,
+    )
+
+    srgb_paths = [p for p in results if p is not None]
 
     logger.info("Batch color correction complete: %d sRGB frames", len(srgb_paths))
     return srgb_paths

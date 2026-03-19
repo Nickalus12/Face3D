@@ -1,5 +1,7 @@
 """Dense point cloud generation from aligned depth maps and camera poses."""
 
+from __future__ import annotations
+
 import logging
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -206,6 +208,7 @@ def generate_dense_pointcloud(
     normal_radius: float = 0.1,
     normal_max_nn: int = 30,
     normal_orient_k: int = 15,
+    max_workers: int | None = None,
 ) -> o3d.geometry.PointCloud:
     """Full pipeline: generate a dense point cloud from aligned depth maps.
 
@@ -231,6 +234,8 @@ def generate_dense_pointcloud(
         normal_radius: Search radius for normal estimation.
         normal_max_nn: Maximum neighbors for normal estimation.
         normal_orient_k: k for consistent normal orientation via tangent plane.
+        max_workers: Number of parallel worker processes for per-frame
+            depth unprojection. Defaults to ``cpu_count - 1``.
 
     Returns:
         Final Open3D PointCloud with estimated normals.
@@ -254,10 +259,11 @@ def generate_dense_pointcloud(
     # Common image extensions to search for
     image_extensions = [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"]
 
-    pointclouds = []
+    # --- Build work items: collect all valid (depth, color, K, extrinsics) tuples ---
+    work_items: list[tuple[Path, Path, np.ndarray, np.ndarray]] = []
     skipped = 0
 
-    for image in tqdm(images.values(), desc="Generating point clouds"):
+    for image in images.values():
         stem = Path(image.name).stem
 
         # Find aligned depth map
@@ -273,7 +279,6 @@ def generate_dense_pointcloud(
             if candidate.exists():
                 color_path = candidate
                 break
-        # Also try the original name from COLMAP
         if color_path is None:
             candidate = frames_dir / image.name
             if candidate.exists():
@@ -284,29 +289,44 @@ def generate_dense_pointcloud(
             skipped += 1
             continue
 
-        # Load data
-        depth_map = np.load(str(depth_path))
-        color_image = cv2.imread(str(color_path))
-        if color_image is None:
-            logger.warning("Failed to read color image: %s", color_path)
-            skipped += 1
-            continue
-
         # Build camera matrices
         camera = cameras[image.camera_id]
         K = get_intrinsics_matrix(camera)
         R = qvec_to_rotmat(image.qvec)
         t = image.tvec
 
-        # Build 4x4 extrinsics matrix
         extrinsics = np.eye(4, dtype=np.float64)
         extrinsics[:3, :3] = R
         extrinsics[:3, 3] = t
 
-        # Generate point cloud for this frame
+        work_items.append((depth_path, color_path, K, extrinsics))
+
+    # --- Parallel unprojection ---
+    from src.utils.parallel import parallel_map
+
+    def _unproject_frame(
+        item: tuple[Path, Path, np.ndarray, np.ndarray],
+    ) -> o3d.geometry.PointCloud | None:
+        """Unproject a single frame's depth map. Process-safe (numpy + Open3D)."""
+        depth_path, color_path, K, extrinsics = item
+        depth_map = np.load(str(depth_path))
+        color_image = cv2.imread(str(color_path))
+        if color_image is None:
+            return None
         pcd = depth_to_pointcloud(depth_map, color_image, K, extrinsics)
         if len(pcd.points) > 0:
-            pointclouds.append(pcd)
+            return pcd
+        return None
+
+    results = parallel_map(
+        _unproject_frame,
+        work_items,
+        max_workers=max_workers,
+        desc="Generating point clouds",
+        use_threads=False,
+    )
+
+    pointclouds = [pcd for pcd in results if pcd is not None]
 
     logger.info(
         "Generated %d frame point clouds (%d skipped)",

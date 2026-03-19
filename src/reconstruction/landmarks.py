@@ -88,8 +88,21 @@ class FaceLandmarkDetector:
             min_tracking_confidence=0.5,
         )
 
+    # Maximum dimension for MediaPipe input.  Larger images are
+    # downscaled before inference and coordinates are mapped back to
+    # the original resolution.  MediaPipe resizes internally anyway,
+    # so this avoids wasting time on 200MP photos.
+    _MAX_INPUT_DIM = 1920
+
     def detect(self, image: np.ndarray) -> Optional[dict]:
         """Detect facial landmarks in a single image.
+
+        For images larger than ``_MAX_INPUT_DIM`` pixels on their longest
+        side, the image is downscaled before MediaPipe inference and the
+        resulting landmark coordinates are mapped back to the original
+        resolution.  This dramatically improves throughput on high-res
+        photos (e.g. 200MP Samsung Expert RAW) with no loss of accuracy
+        since MediaPipe internally resizes to a fixed input tensor.
 
         Args:
             image: BGR image as a numpy array (H, W, 3).
@@ -101,8 +114,19 @@ class FaceLandmarkDetector:
         """
         h, w = image.shape[:2]
 
+        # Downscale if image is very large (MediaPipe resizes internally anyway)
+        scale = 1.0
+        process_image = image
+        if max(h, w) > self._MAX_INPUT_DIM:
+            scale = self._MAX_INPUT_DIM / max(h, w)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            process_image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        ph, pw = process_image.shape[:2]
+
         try:
-            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            rgb = cv2.cvtColor(process_image, cv2.COLOR_BGR2RGB)
             results = self._face_mesh.process(rgb)
         except Exception as e:
             logger.warning("MediaPipe face mesh failed: %s", e)
@@ -119,6 +143,7 @@ class FaceLandmarkDetector:
 
         visibility_sum = 0.0
         for i, lm in enumerate(face.landmark):
+            # Map normalized coords to original resolution
             landmarks_2d[i, 0] = lm.x * w
             landmarks_2d[i, 1] = lm.y * h
             landmarks_3d[i, 0] = lm.x * w
@@ -138,16 +163,32 @@ class FaceLandmarkDetector:
             "quality_score": float(quality_score),
         }
 
-    def detect_batch(self, frames_dir: Path, output_dir: Path) -> list[Path]:
+    def detect_batch(
+        self,
+        frames_dir: Path,
+        output_dir: Path,
+        max_workers: int | None = None,
+    ) -> list[Path]:
         """Detect landmarks for every image in a directory and save as JSON.
+
+        Image I/O (reading from disk) is parallelised with a
+        :class:`~concurrent.futures.ThreadPoolExecutor` while MediaPipe
+        detection runs sequentially on the main thread (MediaPipe/TFLite
+        is not thread-safe).  High-resolution images are automatically
+        downscaled before inference for speed (see :meth:`detect`).
 
         Args:
             frames_dir: Directory containing input images.
             output_dir: Directory where per-frame JSON files are written.
+            max_workers: Number of threads for parallel image I/O.
+                Defaults to an I/O-optimised count.
 
         Returns:
             List of paths to generated JSON files.
         """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from src.utils.parallel import get_optimal_workers
+
         frames_dir = Path(frames_dir)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -163,18 +204,37 @@ class FaceLandmarkDetector:
             return []
 
         logger.info("Detecting landmarks for %d images ...", len(image_paths))
-        output_paths: list[Path] = []
 
+        # --- Pre-load images in parallel (I/O-bound) ---
+        if max_workers is None:
+            max_workers = get_optimal_workers("io")
+
+        loaded_images: dict[int, np.ndarray | None] = {}
+
+        def _read_image(idx_path: tuple[int, Path]) -> tuple[int, np.ndarray | None]:
+            idx, path = idx_path
+            return idx, cv2.imread(str(path))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_read_image, (i, p)): i
+                for i, p in enumerate(image_paths)
+            }
+            for fut in as_completed(futures):
+                idx, img = fut.result()
+                loaded_images[idx] = img
+
+        # --- Sequential MediaPipe detection ---
+        output_paths: list[Path] = []
         detected_count = 0
         failed_count = 0
 
-        for img_path in tqdm(image_paths, desc="Landmarks"):
-            image = cv2.imread(str(img_path))
+        for i, img_path in enumerate(tqdm(image_paths, desc="Landmarks")):
+            image = loaded_images.get(i)
             out_path = output_dir / (img_path.stem + ".json")
 
             if image is None:
                 logger.warning("Could not read image: %s", img_path)
-                # Write an empty detection file instead of skipping
                 payload = {"detected": False, "image": img_path.name}
                 with open(out_path, "w", encoding="utf-8") as fh:
                     json.dump(payload, fh)
@@ -207,6 +267,9 @@ class FaceLandmarkDetector:
             with open(out_path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh)
             output_paths.append(out_path)
+
+        # Free loaded images
+        loaded_images.clear()
 
         logger.info(
             "Saved %d landmark files to %s (%d detected, %d failed)",

@@ -270,6 +270,7 @@ def filter_frames(
     face_confidence: float = 0.5,
     min_face_area_ratio: float = _MIN_FACE_AREA_RATIO,
     quick_mode: bool = False,
+    max_workers: int | None = None,
 ) -> list[Path]:
     """Filter a directory of frames by quality and write selection results.
 
@@ -297,6 +298,8 @@ def filter_frames(
             bounding box must cover.
         quick_mode: If ``True``, skip face detection and use half-res
             blur checks for maximum speed.
+        max_workers: Number of parallel worker processes for blur and
+            exposure checks in quick_mode. Defaults to ``cpu_count - 1``.
 
     Returns:
         List of paths to frames that passed all quality checks.
@@ -329,68 +332,32 @@ def filter_frames(
     selected: list[Path] = []
     report_frames: list[dict] = []
 
-    # Initialize a single MediaPipe detector for the entire batch to avoid
-    # reinitializing the model on every frame. The context manager ensures
-    # proper resource cleanup.
-    face_detector_ctx = None
-    face_detector = None
-    if effective_require_face and _MEDIAPIPE_AVAILABLE and _mp_face_detection is not None:
-        face_detector_ctx = _mp_face_detection.FaceDetection(
-            model_selection=0,
-            min_detection_confidence=face_confidence,
-        )
-        face_detector = face_detector_ctx.__enter__()
+    # --- Quick mode: parallel blur+exposure checks (no MediaPipe) ---
+    if quick_mode:
+        from src.utils.parallel import parallel_map
 
-    try:
-        for i, frame_path in enumerate(frame_files):
+        def _check_frame_quick(frame_path: Path) -> dict:
+            """Blur + exposure check for a single frame (process-safe)."""
             frame = cv2.imread(str(frame_path))
             if frame is None:
-                logger.warning("Cannot read frame, skipping: %s", frame_path)
-                report_frames.append({
+                return {
                     "file": frame_path.name,
                     "path": str(frame_path),
                     "selected": False,
                     "reasons": ["unreadable"],
-                })
-                continue
-
+                }
             reasons: list[str] = []
             details: dict[str, object] = {}
-            face_bbox: Optional[tuple[int, int, int, int]] = None
 
-            # Face detection check (run first so we can use the bbox for blur)
-            if effective_require_face:
-                face_found, conf, face_bbox = check_face_present(
-                    frame,
-                    min_confidence=face_confidence,
-                    detector=face_detector,
-                    min_face_area_ratio=min_face_area_ratio,
-                )
-                details["face_confidence"] = conf
-                if face_bbox is not None:
-                    face_area = face_bbox[2] * face_bbox[3]
-                    frame_area = frame.shape[1] * frame.shape[0]
-                    details["face_area_ratio"] = round(
-                        face_area / frame_area if frame_area > 0 else 0.0, 4,
-                    )
-                if not face_found:
-                    if conf is not None and face_bbox is not None:
-                        reasons.append("face_too_small")
-                    else:
-                        reasons.append("no_face_detected")
-
-            # Blur check (use face region when available for more relevant metric)
             is_sharp, lap_var = check_blur(
-                frame, threshold=blur_threshold, face_bbox=face_bbox,
-                half_res=quick_mode,
+                frame, threshold=blur_threshold, face_bbox=None, half_res=True,
             )
             details["laplacian_variance"] = round(lap_var, 2)
             if not is_sharp:
                 reasons.append(f"blur (variance={lap_var:.1f} < {blur_threshold})")
 
-            # Exposure check
             exposure_ok, exp_stats = check_exposure(
-                frame, low=exposure_low, high=exposure_high
+                frame, low=exposure_low, high=exposure_high,
             )
             details["exposure"] = exp_stats
             if not exposure_ok:
@@ -399,27 +366,118 @@ def filter_frames(
                     f"bright={exp_stats['bright_ratio']:.2%})"
                 )
 
-            is_selected = len(reasons) == 0
-
-            report_frames.append({
+            return {
                 "file": frame_path.name,
                 "path": str(frame_path),
-                "selected": is_selected,
-                "reasons": reasons if reasons else [],
+                "selected": len(reasons) == 0,
+                "reasons": reasons,
                 "details": details,
-            })
+            }
 
-            if is_selected:
+        report_frames = parallel_map(
+            _check_frame_quick,
+            frame_files,
+            max_workers=max_workers,
+            desc="Filtering (quick)",
+            use_threads=False,
+        )
+
+        for entry, frame_path in zip(report_frames, frame_files):
+            if entry is not None and entry.get("selected", False):
                 selected.append(frame_path)
 
-            if (i + 1) % 50 == 0:
-                logger.info(
-                    "Filtered %d / %d frames (%d selected so far)",
-                    i + 1, len(frame_files), len(selected),
+    else:
+        # --- Full mode: sequential with MediaPipe face detection ---
+        # Initialize a single MediaPipe detector for the entire batch to avoid
+        # reinitializing the model on every frame.
+        face_detector_ctx = None
+        face_detector = None
+        if effective_require_face and _MEDIAPIPE_AVAILABLE and _mp_face_detection is not None:
+            face_detector_ctx = _mp_face_detection.FaceDetection(
+                model_selection=0,
+                min_detection_confidence=face_confidence,
+            )
+            face_detector = face_detector_ctx.__enter__()
+
+        try:
+            for i, frame_path in enumerate(frame_files):
+                frame = cv2.imread(str(frame_path))
+                if frame is None:
+                    logger.warning("Cannot read frame, skipping: %s", frame_path)
+                    report_frames.append({
+                        "file": frame_path.name,
+                        "path": str(frame_path),
+                        "selected": False,
+                        "reasons": ["unreadable"],
+                    })
+                    continue
+
+                reasons: list[str] = []
+                details: dict[str, object] = {}
+                face_bbox: Optional[tuple[int, int, int, int]] = None
+
+                # Face detection check (run first so we can use the bbox for blur)
+                if effective_require_face:
+                    face_found, conf, face_bbox = check_face_present(
+                        frame,
+                        min_confidence=face_confidence,
+                        detector=face_detector,
+                        min_face_area_ratio=min_face_area_ratio,
+                    )
+                    details["face_confidence"] = conf
+                    if face_bbox is not None:
+                        face_area = face_bbox[2] * face_bbox[3]
+                        frame_area = frame.shape[1] * frame.shape[0]
+                        details["face_area_ratio"] = round(
+                            face_area / frame_area if frame_area > 0 else 0.0, 4,
+                        )
+                    if not face_found:
+                        if conf is not None and face_bbox is not None:
+                            reasons.append("face_too_small")
+                        else:
+                            reasons.append("no_face_detected")
+
+                # Blur check (use face region when available for more relevant metric)
+                is_sharp, lap_var = check_blur(
+                    frame, threshold=blur_threshold, face_bbox=face_bbox,
+                    half_res=False,
                 )
-    finally:
-        if face_detector_ctx is not None:
-            face_detector_ctx.__exit__(None, None, None)
+                details["laplacian_variance"] = round(lap_var, 2)
+                if not is_sharp:
+                    reasons.append(f"blur (variance={lap_var:.1f} < {blur_threshold})")
+
+                # Exposure check
+                exposure_ok, exp_stats = check_exposure(
+                    frame, low=exposure_low, high=exposure_high
+                )
+                details["exposure"] = exp_stats
+                if not exposure_ok:
+                    reasons.append(
+                        f"exposure (dark={exp_stats['dark_ratio']:.2%}, "
+                        f"bright={exp_stats['bright_ratio']:.2%})"
+                    )
+
+                is_selected = len(reasons) == 0
+
+                report_frames.append({
+                    "file": frame_path.name,
+                    "path": str(frame_path),
+                    "selected": is_selected,
+                    "reasons": reasons if reasons else [],
+                    "details": details,
+                })
+
+                if is_selected:
+                    selected.append(frame_path)
+
+                if (i + 1) % 50 == 0:
+                    logger.info(
+                        "Filtered %d / %d frames (%d selected so far)",
+                        i + 1, len(frame_files), len(selected),
+                    )
+        finally:
+            if face_detector_ctx is not None:
+                face_detector_ctx.__exit__(None, None, None)
 
     # Build summary
     reason_counts: dict[str, int] = {}

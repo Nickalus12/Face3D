@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+import cv2
 import numpy as np
 import torch
 import torch.nn as nn
@@ -53,6 +54,12 @@ _MP_CONTOUR_INDICES = set(range(0, 17)) | {234, 93, 132, 58, 172, 136, 150, 149,
 _MP_FOREHEAD_INDICES = {10, 338, 297, 332, 284, 251, 389, 356, 67, 109, 103, 54, 21, 162,
                         127, 234, 93, 132, 58, 172, 136, 150, 149, 176, 148, 152}
 
+# MediaPipe indices for left/right pupils (iris center landmarks)
+_MP_LEFT_PUPIL = 468   # Left iris center
+_MP_RIGHT_PUPIL = 473  # Right iris center
+# Average adult inter-pupillary distance in meters
+_AVERAGE_IPD_METERS = 0.063
+
 
 def _build_landmark_weights(landmark_indices: list | np.ndarray, device: torch.device) -> torch.Tensor:
     """Return a (K,) weight tensor for the selected landmark subset."""
@@ -72,6 +79,85 @@ def _build_landmark_weights(landmark_indices: list | np.ndarray, device: torch.d
         else:
             weights.append(_LANDMARK_REGION_WEIGHTS["default"])
     return torch.tensor(weights, dtype=torch.float32, device=device)
+
+
+def _estimate_face_yaw_from_landmarks(landmarks_2d: np.ndarray, image_width: int) -> float:
+    """Estimate face yaw angle from 2D landmarks.
+
+    Uses the nose tip (index 1) and left/right face contour landmarks to
+    estimate how frontal the face is.  Returns absolute yaw in degrees
+    (0 = frontal, 90 = profile).
+
+    Args:
+        landmarks_2d: (478, 2) or (N, 2) landmark array.
+        image_width: Width of the source image in pixels.
+
+    Returns:
+        Estimated absolute yaw angle in degrees.
+    """
+    if landmarks_2d.shape[0] < 400:
+        return 90.0  # Not enough landmarks to estimate
+
+    nose_tip = landmarks_2d[1]
+    # Left and right ear-region landmarks
+    left_ear = landmarks_2d[234]
+    right_ear = landmarks_2d[454]
+
+    face_center_x = (left_ear[0] + right_ear[0]) / 2.0
+    face_width = abs(right_ear[0] - left_ear[0])
+
+    if face_width < 1.0:
+        return 90.0
+
+    # Asymmetry ratio: how far the nose is from center relative to face width
+    asymmetry = (nose_tip[0] - face_center_x) / face_width
+    # Map to approximate yaw: asymmetry of 0 = frontal, 0.5 = ~90 degrees
+    yaw_deg = abs(asymmetry) * 180.0
+    return min(yaw_deg, 90.0)
+
+
+def _estimate_scale_from_ipd(
+    landmarks_2d: np.ndarray,
+    camera_K: np.ndarray,
+    depth_at_face: float = 0.5,
+) -> float:
+    """Estimate world-scale correction factor from inter-pupillary distance.
+
+    The FLAME model is in meters.  Given the detected IPD in pixels and the
+    camera intrinsics, we can estimate the depth-to-metric scale so that the
+    reconstructed IPD matches the average human IPD of ~6.3 cm.
+
+    Args:
+        landmarks_2d: (478, 2) landmark array with pupil landmarks.
+        camera_K: (3, 3) camera intrinsic matrix.
+        depth_at_face: Estimated depth to the face in the reconstruction
+            coordinate system (used as initial guess).
+
+    Returns:
+        Scale factor to multiply translation by, or 1.0 if estimation fails.
+    """
+    if landmarks_2d.shape[0] <= max(_MP_LEFT_PUPIL, _MP_RIGHT_PUPIL):
+        return 1.0
+
+    left_pupil = landmarks_2d[_MP_LEFT_PUPIL]
+    right_pupil = landmarks_2d[_MP_RIGHT_PUPIL]
+    ipd_pixels = np.linalg.norm(left_pupil - right_pupil)
+
+    if ipd_pixels < 5.0:
+        return 1.0  # Too small to be reliable
+
+    fx = camera_K[0, 0]
+    if fx < 1.0:
+        return 1.0
+
+    # IPD in world units at the given depth: ipd_world = ipd_pixels * depth / fx
+    ipd_world = ipd_pixels * depth_at_face / fx
+
+    if ipd_world < 1e-6:
+        return 1.0
+
+    scale = _AVERAGE_IPD_METERS / ipd_world
+    return float(scale)
 
 
 class FLAMEFitter:
@@ -109,11 +195,12 @@ class FLAMEFitter:
         num_iterations: int = 1000,
         lr: float = 0.01,
         lambda_temporal: float = 0.1,
+        frame_confidence_weights: Optional[list[float]] = None,
     ) -> dict:
         """Optimize FLAME parameters against multi-view 2D landmarks.
 
         Args:
-            landmarks_2d_per_frame: List of (478, 2) arrays — one per frame.
+            landmarks_2d_per_frame: List of (478, 2) arrays -- one per frame.
                 Only the subset indicated by self.landmark_indices is used.
             cameras: List of camera dicts, each with keys:
                 'K' (3x3 intrinsic), 'R' (3x3 rotation), 't' (3x1 translation),
@@ -124,6 +211,9 @@ class FLAMEFitter:
             lr: Base learning rate (used for stage 1; later stages use lower).
             lambda_temporal: Weight for temporal smoothness regularization
                 when fitting multiple frames. Set to 0.0 to disable.
+            frame_confidence_weights: Optional per-frame confidence weights
+                in [0, 1].  Higher weight means more influence on the fit.
+                If None, all frames are weighted equally.
 
         Returns:
             Dict with optimized parameters and final loss.
@@ -138,6 +228,16 @@ class FLAMEFitter:
             subset = lm2d[lmk_idx]  # (K, 2)
             targets.append(torch.tensor(subset, dtype=torch.float32, device=device))
         targets = torch.stack(targets)  # (F, K, 2)
+
+        # Per-frame confidence weights
+        if frame_confidence_weights is not None:
+            conf_weights = torch.tensor(
+                frame_confidence_weights, dtype=torch.float32, device=device
+            )
+            # Normalize so they sum to num_frames (preserves loss scale)
+            conf_weights = conf_weights * num_frames / conf_weights.sum().clamp(min=1e-6)
+        else:
+            conf_weights = torch.ones(num_frames, dtype=torch.float32, device=device)
 
         # Prepare camera matrices
         cam_K = []
@@ -198,9 +298,15 @@ class FLAMEFitter:
         best_state = None
         initial_loss = None
         loss_history = []
+        # For early stopping on plateau
+        _plateau_window = 100
+        _plateau_threshold = 0.001  # 0.1% improvement
 
         iter_count = 0
+        early_stopped = False
         for stage in stage_configs:
+            if early_stopped:
+                break
             stage_params = stage["params"]
             stage_lr = stage["lr"]
             stage_end = stage["end_iter"]
@@ -252,9 +358,10 @@ class FLAMEFitter:
                 lmk_3d_f32 = lmk_3d.float()
                 proj_loss = torch.tensor(0.0, device=device)
                 for fi in range(num_frames):
-                    proj_loss = proj_loss + self._projection_loss(
+                    frame_loss = self._projection_loss(
                         lmk_3d_f32[0], targets[fi], cam_K[fi], cam_R[fi], cam_t[fi]
                     )
+                    proj_loss = proj_loss + frame_loss * conf_weights[fi]
                 proj_loss = proj_loss / num_frames
 
                 # Regularization
@@ -294,16 +401,45 @@ class FLAMEFitter:
 
                 if iter_count % 100 == 0:
                     current_lr = optimizer.param_groups[0]["lr"]
+                    # Compute trend indicator
+                    trend = ""
+                    if len(loss_history) >= _plateau_window + 1:
+                        prev = loss_history[-_plateau_window - 1]
+                        if prev > 0:
+                            pct_change = (prev - current_loss) / prev * 100
+                            if pct_change > 1.0:
+                                trend = " [decreasing]"
+                            elif pct_change > 0.0:
+                                trend = " [slow]"
+                            else:
+                                trend = " [plateau]"
                     logger.info(
-                        "Iter %4d [%s] | proj=%.6f reg=%.6f temp=%.6f total=%.6f lr=%.5f",
+                        "Iter %4d [%s] | proj=%.6f reg=%.6f temp=%.6f total=%.6f lr=%.5f%s",
                         iter_count, stage["label"],
                         proj_loss.item(), reg_loss.item(), temporal_loss.item(),
-                        total_loss.item(), current_lr,
+                        total_loss.item(), current_lr, trend,
                     )
+
+                # Early stopping: check for plateau after we have enough history
+                if (iter_count > 0 and iter_count % _plateau_window == 0
+                        and len(loss_history) >= _plateau_window + 1
+                        and stage["label"] == "full"):
+                    window_start_loss = loss_history[-_plateau_window - 1]
+                    if window_start_loss > 0:
+                        improvement = (window_start_loss - current_loss) / window_start_loss
+                        if improvement < _plateau_threshold:
+                            logger.info(
+                                "Early stopping at iter %d: improvement %.4f%% < %.1f%% "
+                                "over last %d iters",
+                                iter_count, improvement * 100,
+                                _plateau_threshold * 100, _plateau_window,
+                            )
+                            early_stopped = True
+                            break
 
                 iter_count += 1
 
-        logger.info("Fitting complete — best loss: %.6f", best_loss)
+        logger.info("Fitting complete -- best loss: %.6f (after %d iters)", best_loss, iter_count)
 
         # Convergence checks
         if initial_loss is not None and best_loss >= initial_loss:
@@ -314,7 +450,7 @@ class FLAMEFitter:
 
         if best_loss > 100.0:
             logger.warning(
-                "FLAME fitting final loss %.4f > 100 pixels mean error — result may be poor",
+                "FLAME fitting final loss %.4f > 100 pixels mean error -- result may be poor",
                 best_loss,
             )
 
@@ -335,6 +471,7 @@ class FLAMEFitter:
         best_state["loss"] = best_loss
         best_state["loss_history"] = loss_history
         best_state["converged"] = (initial_loss is not None and best_loss < initial_loss)
+        best_state["early_stopped"] = early_stopped
 
         # Convert tensors to numpy for serialization
         for key in ["shape_params", "expression_params", "jaw_pose", "neck_pose",
@@ -416,6 +553,187 @@ class FLAMEFitter:
         return shape_reg + expr_reg
 
 
+# ── Frame matching utilities ─────────────────────────────────────────────────
+
+
+def _normalize_frame_stem(name: str) -> str:
+    """Extract a canonical stem from a frame filename for matching.
+
+    Strips directory paths, extensions, and normalizes common naming patterns
+    so that e.g. 'frames_srgb/frame_000001.png' matches 'frame_000001.json'.
+
+    Args:
+        name: Filename or path string.
+
+    Returns:
+        Lowercased stem string for comparison.
+    """
+    stem = Path(name).stem.lower()
+    return stem
+
+
+def _match_landmarks_to_cameras(
+    landmark_files: list[Path],
+    colmap_images: dict,
+) -> list[dict]:
+    """Match landmark JSON files to COLMAP camera entries.
+
+    The matching is done by normalised filename stem to handle differences
+    in path prefixes or extensions between the landmark JSONs and the COLMAP
+    images.bin entries.
+
+    Args:
+        landmark_files: Sorted list of landmark JSON paths.
+        colmap_images: Dict from _read_images_binary (image_name -> info).
+
+    Returns:
+        List of dicts, each with keys:
+            'landmark_file': Path to the landmark JSON.
+            'image_name': Matched COLMAP image name.
+            'colmap_info': The COLMAP image dict.
+    """
+    # Build a lookup from normalised stem to COLMAP image name + info
+    stem_to_colmap = {}
+    for img_name, img_info in colmap_images.items():
+        stem = _normalize_frame_stem(img_name)
+        stem_to_colmap[stem] = (img_name, img_info)
+
+    matched = []
+    for lm_file in landmark_files:
+        # Try matching by landmark file stem first
+        lm_stem = _normalize_frame_stem(lm_file.name)
+        if lm_stem in stem_to_colmap:
+            cname, cinfo = stem_to_colmap[lm_stem]
+            matched.append({
+                "landmark_file": lm_file,
+                "image_name": cname,
+                "colmap_info": cinfo,
+            })
+            continue
+
+        # Try reading the JSON to get the stored image name
+        try:
+            with open(lm_file, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            img_name_from_json = data.get("image", "")
+            json_stem = _normalize_frame_stem(img_name_from_json)
+            if json_stem in stem_to_colmap:
+                cname, cinfo = stem_to_colmap[json_stem]
+                matched.append({
+                    "landmark_file": lm_file,
+                    "image_name": cname,
+                    "colmap_info": cinfo,
+                })
+        except (json.JSONDecodeError, IOError):
+            continue
+
+    return matched
+
+
+def _select_frontal_frame(
+    landmark_data_list: list[dict],
+) -> Optional[int]:
+    """Pick the frame index with the most frontal face view.
+
+    Args:
+        landmark_data_list: List of dicts each with 'landmarks_2d' (np array)
+            and 'image_width' (int).
+
+    Returns:
+        Index into landmark_data_list of the most frontal frame, or None
+        if the list is empty.
+    """
+    if not landmark_data_list:
+        return None
+
+    best_idx = 0
+    best_yaw = 90.0
+    for i, entry in enumerate(landmark_data_list):
+        yaw = _estimate_face_yaw_from_landmarks(
+            entry["landmarks_2d"], entry["image_width"]
+        )
+        if yaw < best_yaw:
+            best_yaw = yaw
+            best_idx = i
+
+    logger.info("Most frontal frame: index %d (estimated yaw %.1f deg)", best_idx, best_yaw)
+    return best_idx
+
+
+def _render_flame_overlay(
+    vertices_3d: np.ndarray,
+    faces: np.ndarray,
+    camera: dict,
+    image_path: Path,
+    output_path: Path,
+) -> bool:
+    """Render FLAME mesh wireframe projected onto an image and save as PNG.
+
+    Args:
+        vertices_3d: (V, 3) FLAME mesh vertices in world coordinates.
+        faces: (F, 3) triangle indices.
+        camera: Camera dict with 'K', 'R', 't', 'width', 'height'.
+        image_path: Path to the source image to overlay on.
+        output_path: Path to save the overlay PNG.
+
+    Returns:
+        True if the overlay was saved successfully.
+    """
+    try:
+        image = cv2.imread(str(image_path))
+        if image is None:
+            logger.debug("Cannot read image for overlay: %s", image_path)
+            return False
+
+        K = np.array(camera["K"], dtype=np.float64).reshape(3, 3)
+        R = np.array(camera["R"], dtype=np.float64).reshape(3, 3)
+        t = np.array(camera["t"], dtype=np.float64).reshape(3, 1)
+
+        # Project vertices: p_cam = R @ p_world + t
+        pts_cam = (R @ vertices_3d.T + t).T  # (V, 3)
+        depth = pts_cam[:, 2:3]
+        depth = np.clip(depth, 1e-6, None)
+        pts_norm = pts_cam[:, :2] / depth
+
+        fx, fy = K[0, 0], K[1, 1]
+        cx, cy = K[0, 2], K[1, 2]
+        pts_2d = np.column_stack([
+            fx * pts_norm[:, 0] + cx,
+            fy * pts_norm[:, 1] + cy,
+        ]).astype(np.int32)
+
+        # Draw wireframe edges from face triangles
+        overlay = image.copy()
+        # Only draw a subset of edges to keep it readable
+        edge_set = set()
+        for f in faces:
+            for i in range(3):
+                a, b = int(f[i]), int(f[(i + 1) % 3])
+                edge = (min(a, b), max(a, b))
+                if edge not in edge_set:
+                    edge_set.add(edge)
+
+        h, w = image.shape[:2]
+        for a, b in edge_set:
+            p1 = tuple(pts_2d[a])
+            p2 = tuple(pts_2d[b])
+            # Skip edges that project outside the image
+            if (0 <= p1[0] < w and 0 <= p1[1] < h and
+                    0 <= p2[0] < w and 0 <= p2[1] < h):
+                cv2.line(overlay, p1, p2, (0, 255, 0), 1, cv2.LINE_AA)
+
+        # Blend with original
+        result = cv2.addWeighted(image, 0.6, overlay, 0.4, 0)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(output_path), result)
+        logger.info("Saved FLAME overlay to %s", output_path)
+        return True
+
+    except Exception as e:
+        logger.warning("Failed to render FLAME overlay: %s", e)
+        return False
+
+
 def fit_flame_to_sequence(
     frames_dir: Path,
     landmarks_dir: Path,
@@ -429,6 +747,10 @@ def fit_flame_to_sequence(
     Loads landmarks, cameras, and the FLAME model, runs optimization,
     and saves the fitted parameters and mesh.
 
+    The function is robust to partial data: it normalizes filenames for
+    matching and requires a minimum of 3 frames with both landmark
+    detections and camera parameters.
+
     Args:
         frames_dir: Directory containing input images.
         landmarks_dir: Directory containing per-frame landmark JSON files.
@@ -440,23 +762,56 @@ def fit_flame_to_sequence(
     Returns:
         Dict of fitted FLAME parameters.
     """
-    import struct
-
     frames_dir = Path(frames_dir)
     landmarks_dir = Path(landmarks_dir)
     colmap_model_dir = Path(colmap_model_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Load cameras from COLMAP ───────────────────────────────────────
-    cameras, images = _load_colmap_model(colmap_model_dir)
+    MIN_MATCHED_FRAMES = 3
 
-    # ── Load landmarks ─────────────────────────────────────────────────
+    # ── Load cameras from COLMAP ───────────────────────────────────────
+    cameras_bin_path = colmap_model_dir / "cameras.bin"
+    images_bin_path = colmap_model_dir / "images.bin"
+
+    if not cameras_bin_path.exists() or not images_bin_path.exists():
+        raise RuntimeError(
+            f"COLMAP model not found at {colmap_model_dir} "
+            f"(cameras.bin exists={cameras_bin_path.exists()}, "
+            f"images.bin exists={images_bin_path.exists()})"
+        )
+
+    cameras, images = _load_colmap_model(colmap_model_dir)
+    logger.info(
+        "Loaded COLMAP model: %d cameras, %d images",
+        len(cameras), len(images),
+    )
+
+    # ── Load and match landmarks to cameras ────────────────────────────
     landmark_files = sorted(landmarks_dir.glob("*.json"))
+    if not landmark_files:
+        raise RuntimeError(f"No landmark JSON files found in {landmarks_dir}")
+
+    logger.info("Found %d landmark files in %s", len(landmark_files), landmarks_dir)
+
+    # First pass: build matched pairs using stem-based matching
+    matches = _match_landmarks_to_cameras(landmark_files, images)
+    logger.info(
+        "Stem-based matching: %d/%d landmark files matched to COLMAP images",
+        len(matches), len(landmark_files),
+    )
+
+    # Second pass: load landmark data for matched frames only, filter bad ones
     landmarks_2d_per_frame = []
     camera_list = []
+    frame_confidence_weights = []
+    frame_image_names = []  # Track for visualization
+    landmark_data_for_frontal = []  # For frontal frame selection
 
-    for lm_file in landmark_files:
+    for match in matches:
+        lm_file = match["landmark_file"]
+        colmap_info = match["colmap_info"]
+
         try:
             with open(lm_file, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -464,6 +819,7 @@ def fit_flame_to_sequence(
             logger.warning("Failed to read landmark file %s: %s, skipping", lm_file, e)
             continue
 
+        # Skip frames without detections
         if not data.get("detected", False):
             continue
 
@@ -478,44 +834,75 @@ def fit_flame_to_sequence(
             logger.warning("Landmark file %s has invalid shape %s, skipping", lm_file.name, lm2d.shape)
             continue
 
+        # Build camera dict from COLMAP data
+        cam_id = colmap_info["camera_id"]
+        if cam_id not in cameras:
+            logger.warning("Camera ID %d not found in cameras.bin, skipping %s", cam_id, lm_file.name)
+            continue
+
+        cam = cameras[cam_id]
+        R = colmap_info["rotation_matrix"]
+        t = colmap_info["translation"]
+        K = np.array([
+            [cam["fx"], 0, cam["cx"]],
+            [0, cam["fy"], cam["cy"]],
+            [0, 0, 1],
+        ], dtype=np.float64)
+
+        cam_dict = {
+            "K": K.tolist(),
+            "R": R if isinstance(R, list) else R.tolist(),
+            "t": t if isinstance(t, list) else t.tolist(),
+            "width": cam["width"],
+            "height": cam["height"],
+        }
+
+        # Get confidence/quality weight for this frame
+        quality = data.get("quality_score", data.get("confidence", 1.0))
+
         landmarks_2d_per_frame.append(lm2d)
+        camera_list.append(cam_dict)
+        frame_confidence_weights.append(float(quality))
+        frame_image_names.append(data.get("image", lm_file.stem + ".png"))
 
-        # Match to COLMAP image by filename
-        img_name = data["image"]
-        if img_name in images:
-            cam_info = images[img_name]
-            cam_id = cam_info["camera_id"]
-            cam = cameras[cam_id]
+        landmark_data_for_frontal.append({
+            "landmarks_2d": lm2d,
+            "image_width": data.get("image_width", cam["width"]),
+        })
 
-            # Build camera dict
-            R = cam_info["rotation_matrix"]
-            t = cam_info["translation"]
-            K = np.array([
-                [cam["fx"], 0, cam["cx"]],
-                [0, cam["fy"], cam["cy"]],
-                [0, 0, 1],
-            ], dtype=np.float64)
+    # ── Check minimum frame count ──────────────────────────────────────
+    num_matched = len(landmarks_2d_per_frame)
+    logger.info(
+        "Found %d frames with both landmarks and camera params out of %d landmark files "
+        "and %d COLMAP images",
+        num_matched, len(landmark_files), len(images),
+    )
 
-            camera_list.append({
-                "K": K.tolist(),
-                "R": R.tolist(),
-                "t": t.tolist(),
-                "width": cam["width"],
-                "height": cam["height"],
-            })
+    if num_matched < MIN_MATCHED_FRAMES:
+        raise RuntimeError(
+            f"Only {num_matched} frames have both landmarks and camera params "
+            f"(minimum {MIN_MATCHED_FRAMES} required). "
+            f"Check that landmark detection (stage 9) and camera estimation "
+            f"(stage 6/COLMAP) produced results for overlapping frames."
+        )
+
+    # ── Estimate scale from inter-pupillary distance ───────────────────
+    # Pick the most frontal frame for scale estimation
+    frontal_idx = _select_frontal_frame(landmark_data_for_frontal)
+    if frontal_idx is not None:
+        frontal_lm = landmarks_2d_per_frame[frontal_idx]
+        frontal_K = np.array(camera_list[frontal_idx]["K"], dtype=np.float64).reshape(3, 3)
+        scale_factor = _estimate_scale_from_ipd(frontal_lm, frontal_K, depth_at_face=0.5)
+        if 0.1 < scale_factor < 10.0 and abs(scale_factor - 1.0) > 0.05:
+            logger.info(
+                "IPD-based scale estimation: factor=%.3f (will adjust FLAME translation)",
+                scale_factor,
+            )
         else:
-            logger.warning("Image %s not found in COLMAP model — skipping", img_name)
-
-    if not landmarks_2d_per_frame:
-        logger.error("No valid landmark detections found in %s", landmarks_dir)
-        raise RuntimeError("No valid landmark detections found")
-
-    # Trim to matched pairs
-    min_len = min(len(landmarks_2d_per_frame), len(camera_list))
-    landmarks_2d_per_frame = landmarks_2d_per_frame[:min_len]
-    camera_list = camera_list[:min_len]
-
-    logger.info("Fitting FLAME to %d views ...", len(camera_list))
+            scale_factor = 1.0
+            logger.info("IPD-based scale estimation: factor=%.3f (within tolerance, not adjusting)", scale_factor)
+    else:
+        scale_factor = 1.0
 
     # ── Load FLAME model and embedding ─────────────────────────────────
     from reconstruction.flame_model import FLAMEModel
@@ -525,7 +912,11 @@ def fit_flame_to_sequence(
     embedding = load_mediapipe_to_flame_mapping(embedding_path)
 
     fitter = FLAMEFitter(flame, embedding)
-    result = fitter.fit(landmarks_2d_per_frame, camera_list)
+    result = fitter.fit(
+        landmarks_2d_per_frame,
+        camera_list,
+        frame_confidence_weights=frame_confidence_weights,
+    )
 
     # ── Save outputs ───────────────────────────────────────────────────
     # Save parameters
@@ -553,12 +944,46 @@ def fit_flame_to_sequence(
             "loss_history": result["loss_history"],
             "final_loss": result["loss"],
             "converged": result.get("converged", True),
+            "early_stopped": result.get("early_stopped", False),
             "num_iterations": len(result["loss_history"]),
             "num_views": len(camera_list),
+            "scale_factor": scale_factor,
         }
         with open(convergence_path, "w", encoding="utf-8") as fh:
             json.dump(convergence_data, fh)
         logger.info("Saved convergence data to %s", convergence_path)
+
+    # ── Save intermediate visualizations ──────────────────────────────
+    # Pick up to 3 frames spread across the sequence for overlay verification
+    vis_dir = output_dir / "verification"
+    num_vis = min(3, num_matched)
+    if num_vis > 0:
+        vis_indices = np.linspace(0, num_matched - 1, num_vis, dtype=int)
+        if frontal_idx is not None and frontal_idx not in vis_indices:
+            vis_indices = np.unique(np.append(vis_indices, frontal_idx))
+            vis_indices.sort()
+
+        vertices_3d = result["vertices"][0]  # (V, 3)
+        faces = result["faces"]
+
+        for vi in vis_indices:
+            img_name = frame_image_names[vi]
+            img_path = frames_dir / img_name
+            if not img_path.exists():
+                # Try common extensions
+                for ext in [".png", ".jpg", ".jpeg"]:
+                    candidate = frames_dir / (Path(img_name).stem + ext)
+                    if candidate.exists():
+                        img_path = candidate
+                        break
+
+            if img_path.exists():
+                overlay_name = f"overlay_{Path(img_name).stem}.png"
+                _render_flame_overlay(
+                    vertices_3d, faces,
+                    camera_list[vi], img_path,
+                    vis_dir / overlay_name,
+                )
 
     return result
 

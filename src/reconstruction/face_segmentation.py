@@ -283,8 +283,22 @@ class FaceSegmenter:
                 model_selection=1,  # 1 = general model (landscape), 0 = closer-range
             )
 
+    # Maximum dimension for MediaPipe input.  Larger images are
+    # downscaled before inference and the mask is upscaled back.
+    # MediaPipe resizes internally to a fixed tensor anyway, so
+    # feeding 200MP images only wastes time on the colorspace
+    # conversion and data transfer.
+    _MAX_INPUT_DIM = 1080
+
     def segment(self, image: np.ndarray, threshold: float = 0.5) -> np.ndarray:
         """Produce a binary face/person mask for a single image.
+
+        For images larger than ``_MAX_INPUT_DIM`` pixels on their longest
+        side, the image is downscaled before MediaPipe inference and the
+        resulting mask is upscaled back to the original resolution using
+        nearest-neighbor interpolation.  This avoids the massive overhead
+        of processing 200MP photos through MediaPipe when it internally
+        resizes to a much smaller tensor anyway.
 
         Args:
             image: BGR image as numpy array (H, W, 3).
@@ -293,18 +307,33 @@ class FaceSegmenter:
         Returns:
             Binary mask as uint8 array (H, W) with 255 for face/person, 0 for background.
         """
+        h, w = image.shape[:2]
+
+        # Downscale large images for MediaPipe efficiency
+        scale = 1.0
+        process_image = image
+        if max(h, w) > self._MAX_INPUT_DIM:
+            scale = self._MAX_INPUT_DIM / max(h, w)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            process_image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
         mask = None
 
-        # Try SAM2 first if available
+        # Try SAM2 first if available (SAM2 benefits from higher res, pass original)
         if _SAM2_AVAILABLE and self._sam2_predictor is not None:
             mask = try_sam2_segmentation(image, predictor=self._sam2_predictor)
 
-        # Fallback to MediaPipe
+        # Fallback to MediaPipe (use downscaled image)
         if mask is None and self._segmenter is not None:
-            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            rgb = cv2.cvtColor(process_image, cv2.COLOR_BGR2RGB)
             results = self._segmenter.process(rgb)
             raw_mask = results.segmentation_mask
             mask = (raw_mask > threshold).astype(np.uint8) * 255
+
+            # Upscale mask back to original resolution if we downscaled
+            if scale < 1.0:
+                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
 
         if mask is None:
             # Last resort: return empty mask
@@ -327,8 +356,15 @@ class FaceSegmenter:
         output_dir: Path,
         threshold: float = 0.5,
         refine_grabcut: bool = True,
+        max_workers: int | None = None,
     ) -> list[Path]:
         """Segment all images in a directory and save masks as PNG.
+
+        Image I/O (reading from disk) is parallelised with a
+        :class:`~concurrent.futures.ThreadPoolExecutor` while MediaPipe
+        segmentation runs sequentially on the main thread (MediaPipe is
+        not thread/process-safe).  High-resolution images are
+        automatically downscaled before inference (see :meth:`segment`).
 
         Args:
             frames_dir: Directory containing input images.
@@ -336,10 +372,15 @@ class FaceSegmenter:
             threshold: Confidence threshold for binary masks.
             refine_grabcut: If ``True``, apply GrabCut refinement to each
                 mask for cleaner boundaries (default ``True``).
+            max_workers: Number of threads for parallel image I/O.
+                Defaults to an I/O-optimised count.
 
         Returns:
             List of paths to generated mask files.
         """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from src.utils.parallel import get_optimal_workers
+
         frames_dir = Path(frames_dir)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -355,12 +396,33 @@ class FaceSegmenter:
             return []
 
         logger.info("Segmenting %d images ...", len(image_paths))
+
+        # --- Pre-load images in parallel (I/O-bound) ---
+        if max_workers is None:
+            max_workers = get_optimal_workers("io")
+
+        loaded_images: dict[int, np.ndarray | None] = {}
+
+        def _read_image(idx_path: tuple[int, Path]) -> tuple[int, np.ndarray | None]:
+            idx, path = idx_path
+            return idx, cv2.imread(str(path))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_read_image, (i, p)): i
+                for i, p in enumerate(image_paths)
+            }
+            for fut in as_completed(futures):
+                idx, img = fut.result()
+                loaded_images[idx] = img
+
+        # --- Sequential MediaPipe segmentation ---
         output_paths: list[Path] = []
         quality_scores: list[float] = []
         low_quality_count = 0
 
-        for img_path in tqdm(image_paths, desc="Segmentation"):
-            image = cv2.imread(str(img_path))
+        for i, img_path in enumerate(tqdm(image_paths, desc="Segmentation")):
+            image = loaded_images.get(i)
             if image is None:
                 logger.warning("Could not read image: %s", img_path)
                 continue
@@ -383,6 +445,9 @@ class FaceSegmenter:
             out_path = output_dir / (img_path.stem + "_mask.png")
             cv2.imwrite(str(out_path), mask)
             output_paths.append(out_path)
+
+        # Free loaded images
+        loaded_images.clear()
 
         # Summary statistics
         if quality_scores:
