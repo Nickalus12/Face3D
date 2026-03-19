@@ -84,6 +84,45 @@ pub async fn list_previews(session_id: String) -> AppResult<Vec<PreviewFile>> {
         });
     }
 
+    // Also scan face_masks/ directory in processed/
+    let masks_dir = Path::new(PROJECT_ROOT)
+        .join("data/processed")
+        .join(&session_id)
+        .join("face_masks");
+    if masks_dir.exists() && masks_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&masks_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && is_image_extension(&path) {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    result.push(PreviewFile {
+                        name,
+                        preview_type: "mask".to_string(),
+                        path: path.to_string_lossy().into_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Also scan comparisons/ subdirectory in previews
+    let comparisons_dir = previews_dir.join("comparisons");
+    if comparisons_dir.exists() && comparisons_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&comparisons_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && is_image_extension(&path) {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    result.push(PreviewFile {
+                        name,
+                        preview_type: "comparison".to_string(),
+                        path: path.to_string_lossy().into_owned(),
+                    });
+                }
+            }
+        }
+    }
+
     result.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(result)
 }
