@@ -4,10 +4,14 @@
   --color-zinc-925: #111113;
 }
 
+/* ── Base Reset & Font Rendering ──────────────────────────────── */
+
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 html,
@@ -28,34 +32,400 @@ body,
     Ubuntu,
     Cantarell,
     sans-serif;
+  text-rendering: optimizeLegibility;
 }
 
-/* Custom scrollbar for dark theme */
+/* ── Selection Color ──────────────────────────────────────────── */
+
+::selection {
+  background: rgba(99, 102, 241, 0.3);
+  color: #e4e4e7;
+}
+
+/* ── Focus Ring Style ─────────────────────────────────────────── */
+
+*:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.5);
+  border-radius: 4px;
+}
+
+/* ── Custom Scrollbar (thin, dark) ────────────────────────────── */
+
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--color-zinc-900);
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--color-zinc-700);
-  border-radius: 3px;
+  background: #27272a;
+  border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--color-zinc-600);
+  background: #3f3f46;
 }
 
-/* Smooth transitions globally */
+/* ── Smooth Transitions Globally ──────────────────────────────── */
+
 button,
 a,
 input {
   transition:
-    background-color 150ms ease,
-    border-color 150ms ease,
-    color 150ms ease,
-    opacity 150ms ease;
+    background-color 150ms ease-out,
+    border-color 150ms ease-out,
+    color 150ms ease-out,
+    opacity 150ms ease-out,
+    box-shadow 200ms ease-out,
+    transform 150ms ease-out;
+}
+
+/* ── Animation Keyframes ──────────────────────────────────────── */
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes pulse-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 8px rgba(99, 102, 241, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 20px rgba(99, 102, 241, 0.4);
+  }
+}
+
+@keyframes pulse-glow-emerald {
+  0%,
+  100% {
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.15);
+  }
+  50% {
+    box-shadow: 0 0 20px rgba(16, 185, 129, 0.35);
+  }
+}
+
+@keyframes pulse-glow-red {
+  0%,
+  100% {
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 16px rgba(239, 68, 68, 0.4);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes countUp {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes confetti-dot {
+  0% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-20px) scale(0.5);
+  }
+}
+
+@keyframes dots {
+  0%,
+  20% {
+    content: "";
+  }
+  40% {
+    content: ".";
+  }
+  60% {
+    content: "..";
+  }
+  80%,
+  100% {
+    content: "...";
+  }
+}
+
+@keyframes sparkline-in {
+  from {
+    opacity: 0;
+    transform: scaleY(0);
+    transform-origin: bottom;
+  }
+  to {
+    opacity: 1;
+    transform: scaleY(1);
+    transform-origin: bottom;
+  }
+}
+
+/* ── Utility: Animated Dots (Running...) ──────────────────────── */
+
+.animated-dots::after {
+  content: "";
+  animation: dots 1.5s steps(1, end) infinite;
+}
+
+/* ── Utility: Glass Morphism ──────────────────────────────────── */
+
+.glass {
+  background: rgba(10, 10, 11, 0.8);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+/* ── Utility: Gradient Text ───────────────────────────────────── */
+
+.gradient-text {
+  background: linear-gradient(135deg, #818cf8, #6366f1, #a78bfa);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.gradient-text-emerald {
+  background: linear-gradient(135deg, #34d399, #10b981, #6ee7b7);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Utility: Hide Scrollbar ──────────────────────────────────── */
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* ── Utility: Noise Texture Overlay ───────────────────────────── */
+
+.noise-overlay::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.015;
+  pointer-events: none;
+  z-index: 9999;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
+}
+
+/* ── Utility: Fade-in animation helper ────────────────────────── */
+
+.animate-fadeIn {
+  animation: fadeIn 300ms ease-out;
+}
+
+.animate-slideUp {
+  animation: slideUp 300ms ease-out;
+}
+
+.animate-slideDown {
+  animation: slideDown 300ms ease-out;
+}
+
+.animate-scaleIn {
+  animation: scaleIn 200ms ease-out;
+}
+
+.animate-slideInLeft {
+  animation: slideInLeft 200ms ease-out;
+}
+
+/* ── Utility: Pulse Glow ──────────────────────────────────────── */
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+.animate-pulse-glow-emerald {
+  animation: pulse-glow-emerald 2s ease-in-out infinite;
+}
+
+.animate-pulse-glow-red {
+  animation: pulse-glow-red 2s ease-in-out infinite;
+}
+
+/* ── Utility: Skeleton Loading ────────────────────────────────── */
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    #18181b 25%,
+    #27272a 50%,
+    #18181b 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: 6px;
+}
+
+/* ── Custom Range Input Styling ───────────────────────────────── */
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: #27272a;
+  border-radius: 9999px;
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #6366f1;
+  cursor: pointer;
+  border: 2px solid #0a0a0b;
+  box-shadow: 0 0 8px rgba(99, 102, 241, 0.3);
+  transition: box-shadow 200ms ease-out, transform 150ms ease-out;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+  box-shadow: 0 0 14px rgba(99, 102, 241, 0.5);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #6366f1;
+  cursor: pointer;
+  border: 2px solid #0a0a0b;
+  box-shadow: 0 0 8px rgba(99, 102, 241, 0.3);
+}
+
+/* ── Gradient Top Border (used in StatusBar) ──────────────────── */
+
+.gradient-border-top {
+  border-top: 1px solid transparent;
+  border-image: linear-gradient(
+      90deg,
+      transparent,
+      #3f3f46,
+      transparent
+    )
+    1;
+}
+
+/* ── Resize Handle Grip Dots ──────────────────────────────────── */
+
+.grip-dots {
+  display: flex;
+  gap: 3px;
+  justify-content: center;
+  align-items: center;
+}
+
+.grip-dots::before,
+.grip-dots::after,
+.grip-dots span {
+  content: "";
+  display: block;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: #52525b;
+  transition: background 150ms ease-out;
+}
+
+.grip-dots:hover::before,
+.grip-dots:hover::after,
+.grip-dots:hover span {
+  background: #a1a1aa;
+}
+
+/* ── Crosshair Cursor for Charts ──────────────────────────────── */
+
+.chart-crosshair .recharts-wrapper {
+  cursor: crosshair !important;
+}
+
+/* ── Sparkline Bar ────────────────────────────────────────────── */
+
+.sparkline-bar {
+  animation: sparkline-in 300ms ease-out forwards;
 }

@@ -1,24 +1,31 @@
-import { useEffect, useRef, useState } from 'react';
-import Sidebar from './components/Sidebar';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import Sidebar, { type ViewId } from './components/Sidebar';
 import Viewer3D from './components/Viewer3D';
+import { Gallery } from './components/Gallery';
+import SensorPanel from './components/SensorPanel';
+import CameraTrajectory from './components/CameraTrajectory';
+import CompareView from './components/CompareView';
+import SettingsPanel from './components/SettingsPanel';
 import StatusBar from './components/StatusBar';
-import { ChevronRight, ChevronLeft, Terminal, Maximize2, Play, Pause, MoreHorizontal, Layers, Clock } from 'lucide-react';
+import KeyboardShortcuts from './components/KeyboardShortcuts';
+import { ChevronRight, ChevronLeft, Terminal, Maximize2, Play, Pause } from 'lucide-react';
 import useSessionStore from './store/sessionStore';
 import usePipelineStore from './store/pipelineStore';
 import { onPipelineLog, onPipelineComplete } from './lib/tauri';
+import ToastContainer from './components/Toast';
+import { DetailPanel } from './components/DetailPanel';
 
 export default function App() {
+  const [activeView, setActiveView] = useState<ViewId>('view');
   const [isPanelOpen, setIsPanelOpen] = useState(true);
   const [isConsoleOpen, setIsConsoleOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const consoleRef = useRef<HTMLDivElement>(null);
 
   const { fetchSessions } = useSessionStore();
   const {
     status,
-    stages,
     logs,
-    metrics,
-    startedAt,
     fetchGpuInfo,
     stopPipeline,
   } = usePipelineStore();
@@ -27,8 +34,12 @@ export default function App() {
 
   // ── Bootstrap on mount ──────────────────────────────────────
   useEffect(() => {
-    fetchSessions();
-    fetchGpuInfo();
+    const init = async () => {
+      await fetchSessions();
+      await fetchGpuInfo();
+      setIsLoading(false);
+    };
+    init();
   }, [fetchSessions, fetchGpuInfo]);
 
   // ── Tauri event listeners ───────────────────────────────────
@@ -44,6 +55,12 @@ export default function App() {
       usePipelineStore.getState().onPipelineComplete(exitCode);
       // Refresh sessions to pick up new output files
       useSessionStore.getState().fetchSessions();
+      // Flash window title bar on completion
+      if (document.title) {
+        const original = document.title;
+        document.title = 'Pipeline Complete!';
+        setTimeout(() => { document.title = original; }, 3000);
+      }
     });
     if (completeUnsub) unlisteners.push(completeUnsub);
 
@@ -68,30 +85,25 @@ export default function App() {
     }
   }, [logs.length, isConsoleOpen]);
 
-  // ── Elapsed time ────────────────────────────────────────────
-  const [elapsed, setElapsed] = useState(0);
-  useEffect(() => {
-    if (!startedAt || !isRunning) return;
-    const tick = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - startedAt) / 1000));
-    }, 1000);
-    return () => clearInterval(tick);
-  }, [startedAt, isRunning]);
+  // ── Keyboard shortcut handlers ──────────────────────────────
+  const handleViewChange = useCallback((view: ViewId) => {
+    setActiveView(view);
+  }, []);
 
-  const formatElapsed = (s: number) => {
-    const m = Math.floor(s / 60);
-    const sec = s % 60;
-    return `${m}m ${sec.toString().padStart(2, '0')}s`;
-  };
-
-  // Latest metrics
-  const latestMetric = metrics.length > 0 ? metrics[metrics.length - 1] : null;
-  const gaussianCount = latestMetric?.gaussians;
+  const handleToggleConsole = useCallback(() => {
+    setIsConsoleOpen((prev) => !prev);
+  }, []);
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-[#0a0a0b] text-zinc-300 font-sans overflow-hidden selection:bg-indigo-500/30">
+    <div className="flex flex-col h-screen w-screen bg-[#0a0a0b] text-zinc-300 font-sans overflow-hidden selection:bg-indigo-500/30 noise-overlay">
+      {/* Keyboard shortcuts listener */}
+      <KeyboardShortcuts
+        onViewChange={handleViewChange}
+        onToggleConsole={handleToggleConsole}
+      />
+
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar />
+        <Sidebar activeView={activeView} onViewChange={setActiveView} />
 
         {/* Collapsible Detail Panel */}
         <div
@@ -99,127 +111,7 @@ export default function App() {
             isPanelOpen ? 'w-[280px] opacity-100' : 'w-0 opacity-0 overflow-hidden'
           }`}
         >
-          {/* Panel Header */}
-          <div className="h-14 flex items-center justify-between px-4 border-b border-zinc-800/40 shrink-0">
-            <h2 className="text-xs font-semibold tracking-widest text-zinc-400 uppercase">Session Info</h2>
-            <button className="text-zinc-500 hover:text-zinc-200 transition-colors">
-              <MoreHorizontal size={16} />
-            </button>
-          </div>
-
-          {/* Panel Content */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-6 scrollbar-hide">
-            {/* Pipeline Status */}
-            <div>
-              <div className="text-[10px] font-bold tracking-wider text-zinc-500 uppercase mb-3">Pipeline Overview</div>
-              <div className="space-y-2 relative before:absolute before:inset-y-3 before:left-[11px] before:w-[2px] before:bg-zinc-800/50">
-                {stages.map((stage) => {
-                  const isCurrent = stage.status === 'running';
-                  const isDone = stage.status === 'complete';
-                  const isError = stage.status === 'error';
-
-                  return (
-                    <div key={stage.id} className="relative flex items-center gap-3">
-                      <div
-                        className={`w-6 h-6 rounded-full flex items-center justify-center z-10 shrink-0 ${
-                          isDone
-                            ? 'bg-emerald-500/20 border border-emerald-500/30'
-                            : isCurrent
-                            ? 'bg-indigo-500/20 border border-indigo-500/30 ring-4 ring-[#0e0e11]'
-                            : isError
-                            ? 'bg-red-500/20 border border-red-500/30'
-                            : 'bg-zinc-800/50 border border-zinc-700/50'
-                        }`}
-                      >
-                        <div
-                          className={`w-2 h-2 rounded-full ${
-                            isDone
-                              ? 'bg-emerald-400'
-                              : isCurrent
-                              ? 'bg-indigo-400 animate-pulse'
-                              : isError
-                              ? 'bg-red-400'
-                              : 'bg-zinc-600'
-                          }`}
-                        />
-                      </div>
-                      <div
-                        className={`flex-1 p-2.5 rounded-lg text-sm flex justify-between items-center ${
-                          isDone
-                            ? 'bg-white/[0.02] border border-white/5'
-                            : isCurrent
-                            ? 'bg-indigo-500/5 border border-indigo-500/20 shadow-[0_0_15px_rgba(99,102,241,0.05)]'
-                            : isError
-                            ? 'bg-red-500/5 border border-red-500/20'
-                            : 'bg-transparent border border-transparent opacity-50'
-                        }`}
-                      >
-                        <span
-                          className={
-                            isCurrent
-                              ? 'text-indigo-300 font-medium'
-                              : isDone
-                              ? 'text-zinc-300'
-                              : isError
-                              ? 'text-red-300'
-                              : 'text-zinc-500'
-                          }
-                        >
-                          {stage.name}
-                        </span>
-                        <span
-                          className={`text-[10px] font-mono ${
-                            isCurrent
-                              ? 'text-indigo-400 animate-pulse'
-                              : isDone
-                              ? 'text-zinc-500'
-                              : isError
-                              ? 'text-red-400'
-                              : 'text-zinc-600'
-                          }`}
-                        >
-                          {isDone
-                            ? 'Done'
-                            : isCurrent
-                            ? 'Running'
-                            : isError
-                            ? 'Error'
-                            : 'Wait'}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Quick Stats */}
-            <div>
-              <div className="text-[10px] font-bold tracking-wider text-zinc-500 uppercase mb-3">Live Metrics</div>
-              <div className="grid grid-cols-2 gap-2">
-                <div className="bg-white/[0.02] border border-white/5 p-3 rounded-lg flex flex-col gap-1">
-                  <Layers size={14} className="text-blue-400" />
-                  <span className="text-lg font-medium text-zinc-200 mt-1">
-                    {gaussianCount
-                      ? gaussianCount >= 1_000_000
-                        ? `${(gaussianCount / 1_000_000).toFixed(1)}M`
-                        : gaussianCount >= 1_000
-                        ? `${Math.round(gaussianCount / 1_000)}K`
-                        : gaussianCount.toString()
-                      : '--'}
-                  </span>
-                  <span className="text-[10px] text-zinc-500 uppercase">Gaussians</span>
-                </div>
-                <div className="bg-white/[0.02] border border-white/5 p-3 rounded-lg flex flex-col gap-1">
-                  <Clock size={14} className="text-amber-400" />
-                  <span className="text-lg font-medium text-zinc-200 mt-1">
-                    {isRunning && startedAt ? formatElapsed(elapsed) : '--'}
-                  </span>
-                  <span className="text-[10px] text-zinc-500 uppercase">Elapsed</span>
-                </div>
-              </div>
-            </div>
-          </div>
+          <DetailPanel isExpanded={isPanelOpen} onToggle={() => setIsPanelOpen(!isPanelOpen)} />
 
           {/* Master Control */}
           <div className="p-4 border-t border-zinc-800/40 bg-zinc-900/20 shrink-0">
@@ -228,10 +120,9 @@ export default function App() {
                 if (isRunning) {
                   stopPipeline();
                 }
-                // Start is handled from PipelinePanel / PipelineControl
               }}
               disabled={!isRunning}
-              className={`w-full py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-all shadow-lg ${
+              className={`w-full py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-all duration-200 shadow-lg active:scale-[0.98] ${
                 isRunning
                   ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 shadow-red-500/5'
                   : 'bg-zinc-800 text-zinc-500 border border-zinc-700/50 cursor-not-allowed'
@@ -248,29 +139,45 @@ export default function App() {
           {/* Panel Toggle button */}
           <button
             onClick={() => setIsPanelOpen(!isPanelOpen)}
-            className="absolute top-5 left-4 z-20 p-1.5 bg-[#111113]/80 backdrop-blur-xl border border-white/10 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800/80 transition-all shadow-lg"
+            className="absolute top-5 left-4 z-20 p-1.5 bg-[#111113]/80 backdrop-blur-xl border border-white/10 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800/80 active:scale-90 transition-all duration-150 shadow-lg shadow-black/20"
           >
             {isPanelOpen ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
           </button>
 
-          {/* 3D Viewport */}
+          {/* Main Content — switches on active view */}
           <div className="flex-1 relative rounded-tl-xl overflow-hidden border-t border-l border-white/5">
-            <Viewer3D />
+            {activeView === 'gallery' ? (
+              <Gallery />
+            ) : activeView === 'settings' ? (
+              <SettingsPanel />
+            ) : activeView === 'sensors' ? (
+              <div className="h-full overflow-y-auto scrollbar-hide">
+                <SensorPanel />
+                <div className="px-6 pb-6">
+                  <CameraTrajectory />
+                </div>
+              </div>
+            ) : activeView === 'compare' ? (
+              <CompareView />
+            ) : (
+              <Viewer3D />
+            )}
           </div>
 
           {/* Console Trigger Button (when closed) */}
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20">
             <button
               onClick={() => setIsConsoleOpen(!isConsoleOpen)}
-              className={`flex items-center gap-2 px-4 py-1.5 bg-[#111113]/90 backdrop-blur-md border border-white/10 rounded-full text-[11px] font-medium transition-all shadow-xl ${
+              className={`flex items-center gap-2 px-4 py-1.5 bg-[#111113]/90 backdrop-blur-md border border-white/10 rounded-full text-[11px] font-medium transition-all duration-200 shadow-xl shadow-black/20 active:scale-95 ${
                 isConsoleOpen
                   ? 'opacity-0 pointer-events-none'
-                  : 'opacity-100 text-zinc-400 hover:text-white hover:scale-105'
+                  : 'opacity-100 text-zinc-400 hover:text-white hover:scale-105 hover:bg-zinc-800/80'
               }`}
             >
               <Terminal size={14} className="text-indigo-400" /> View Logs
+              <kbd className="text-zinc-600 text-[9px] font-mono ml-1">Ctrl+`</kbd>
               {logs.length > 0 && (
-                <span className="ml-1 px-1.5 py-0.5 bg-indigo-500/20 text-indigo-300 rounded-full text-[9px] font-bold">
+                <span className="ml-1 px-1.5 py-0.5 bg-indigo-500/20 text-indigo-300 rounded-full text-[9px] font-bold tabular-nums">
                   {logs.length}
                 </span>
               )}
@@ -288,7 +195,7 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <Terminal size={14} className="text-zinc-400" />
                 <span className="text-xs font-semibold tracking-wider text-zinc-300">SYSTEM CONSOLE</span>
-                <span className="text-[10px] text-zinc-600 ml-2">{logs.length} lines</span>
+                <span className="text-[10px] text-zinc-600 ml-2 tabular-nums">{logs.length} lines</span>
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -338,6 +245,7 @@ export default function App() {
       </div>
 
       <StatusBar />
+      <ToastContainer />
     </div>
   );
 }

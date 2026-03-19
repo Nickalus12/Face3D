@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import usePipelineStore from '../store/pipelineStore';
 
 export default function StatusBar() {
@@ -12,6 +13,24 @@ export default function StatusBar() {
   const vramTotalMB = gpuInfo?.memory_total ? parseFloat(gpuInfo.memory_total) : 0;
   const vramUsedGB = (vramUsedMB / 1024).toFixed(1);
   const vramTotalGB = Math.round(vramTotalMB / 1024);
+  const vramPercent = vramTotalMB > 0 ? (vramUsedMB / vramTotalMB) * 100 : 0;
+
+  // GPU utilization
+  const utilization = gpuInfo?.utilization ? parseInt(gpuInfo.utilization, 10) : 0;
+  const utilColor =
+    utilization > 80
+      ? 'text-red-400'
+      : utilization > 50
+      ? 'text-amber-400'
+      : 'text-emerald-400';
+
+  // VRAM bar color
+  const vramBarColor =
+    vramPercent > 80
+      ? 'bg-red-500'
+      : vramPercent > 60
+      ? 'bg-amber-500'
+      : 'bg-emerald-500';
 
   // Gaussian count formatting
   const gsCount = latestMetric?.gaussians;
@@ -31,12 +50,38 @@ export default function StatusBar() {
     ? 'Error'
     : 'Idle';
 
+  // FPS counter
+  const [fps, setFps] = useState(0);
+  const frameRef = useRef<number>(0);
+  const lastTimeRef = useRef<number>(performance.now());
+  const frameCountRef = useRef<number>(0);
+
+  useEffect(() => {
+    const tick = (now: number) => {
+      frameCountRef.current++;
+      const delta = now - lastTimeRef.current;
+      if (delta >= 1000) {
+        setFps(Math.round((frameCountRef.current * 1000) / delta));
+        frameCountRef.current = 0;
+        lastTimeRef.current = now;
+      }
+      frameRef.current = requestAnimationFrame(tick);
+    };
+    frameRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frameRef.current);
+  }, []);
+
+  // Separator dot
+  const Dot = () => (
+    <span className="text-zinc-700 text-[6px] leading-none select-none">&#x2022;</span>
+  );
+
   return (
-    <div className="h-[22px] bg-[#0a0a0b] border-t border-white/5 flex items-center px-3 justify-between text-[10px] font-mono tracking-wide text-zinc-500 shrink-0 z-50 select-none">
+    <div className="h-[22px] gradient-border-top bg-[#0a0a0b] flex items-center px-3 justify-between text-[10px] font-mono tracking-wide text-zinc-500 shrink-0 z-50 select-none">
       {/* Left side metrics */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2.5">
         {/* Pipeline Status */}
-        <div className="flex items-center gap-2 bg-white/5 px-2 py-0.5 rounded text-zinc-300">
+        <div className="flex items-center gap-1.5 bg-white/[0.03] px-2 py-0.5 rounded text-zinc-300">
           <span className="relative flex h-1.5 w-1.5">
             {isRunning && (
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-60" />
@@ -53,33 +98,58 @@ export default function StatusBar() {
               }`}
             />
           </span>
-          <span className="tracking-tight">{statusLabel}</span>
+          <span className="tracking-tight">
+            {isRunning ? (
+              <span className="animated-dots">{statusLabel}</span>
+            ) : (
+              statusLabel
+            )}
+          </span>
         </div>
 
-        <div className="w-[1px] h-3 bg-white/10" />
+        <Dot />
 
         <div className="flex items-center gap-1.5 hover:text-zinc-300 transition-colors cursor-default">
           <span className="text-zinc-600">GPU</span>
           <span className="text-zinc-300">{gpuName}</span>
         </div>
 
-        <div className="w-[1px] h-3 bg-white/10" />
+        <Dot />
 
+        {/* GPU Utilization */}
+        <div className="flex items-center gap-1.5 hover:text-zinc-300 transition-colors cursor-default">
+          <span className="text-zinc-600">Util</span>
+          <span className={utilColor}>
+            {gpuInfo ? `${utilization}%` : '--'}
+          </span>
+        </div>
+
+        <Dot />
+
+        {/* VRAM with inline mini progress bar */}
         <div className="flex items-center gap-1.5 hover:text-zinc-300 transition-colors cursor-default">
           <span className="text-zinc-600">VRAM</span>
           <span className="text-zinc-300">
             {gpuInfo ? `${vramUsedGB}/${vramTotalGB}GB` : '--'}
           </span>
+          {gpuInfo && (
+            <div className="w-12 h-[4px] bg-zinc-800 rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all duration-500 ${vramBarColor}`}
+                style={{ width: `${Math.min(100, vramPercent)}%` }}
+              />
+            </div>
+          )}
         </div>
 
-        <div className="w-[1px] h-3 bg-white/10" />
+        <Dot />
 
         <div className="flex items-center gap-1.5 hover:text-zinc-300 transition-colors cursor-default">
           <span className="text-zinc-600">GS</span>
           <span className="text-zinc-300">{gsDisplay}</span>
         </div>
 
-        <div className="w-[1px] h-3 bg-white/10" />
+        <Dot />
 
         <div className="flex items-center gap-1.5 hover:text-zinc-300 transition-colors cursor-default">
           <span className="text-zinc-600">PSNR</span>
@@ -90,11 +160,9 @@ export default function StatusBar() {
       </div>
 
       {/* Right side info */}
-      <div className="flex items-center gap-4 text-zinc-600">
-        <span className="hover:text-zinc-400 transition-colors cursor-pointer">
-          {gpuInfo?.utilization ? `Util: ${gpuInfo.utilization}` : ''}
-        </span>
-        <div className="w-[1px] h-3 bg-white/10" />
+      <div className="flex items-center gap-2.5 text-zinc-600">
+        <span className="text-zinc-500 tabular-nums">{fps} fps</span>
+        <Dot />
         <span>Face3D v2.0.4-beta</span>
       </div>
     </div>

@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Terminal, Search, Lock, Unlock, Copy, GripHorizontal, Trash2 } from 'lucide-react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { Terminal, Search, Lock, Unlock, Copy, Trash2 } from 'lucide-react';
 import usePipelineStore from '../store/pipelineStore';
 
 type LogFilter = 'all' | 'info' | 'warn' | 'error' | 'stderr';
@@ -11,7 +11,8 @@ export const Console: React.FC = () => {
   const [search, setSearch] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const { logs, clearLogs } = usePipelineStore();
+  const { logs, clearLogs, status } = usePipelineStore();
+  const isComplete = status === 'complete';
 
   // Filter logs
   const filteredLogs = logs.filter((log) => {
@@ -38,22 +39,40 @@ export const Console: React.FC = () => {
     navigator.clipboard.writeText(allText);
   };
 
-  const FILTERS: { label: string; value: LogFilter }[] = [
-    { label: 'All', value: 'all' },
-    { label: 'Info', value: 'info' },
-    { label: 'Warn', value: 'warn' },
-    { label: 'Error', value: 'error' },
-    { label: 'Stderr', value: 'stderr' },
+  // Log rate sparkline (lines/sec over last 30 seconds)
+  const sparklineData = useMemo(() => {
+    if (logs.length < 2) return [];
+    const now = Date.now();
+    const buckets: number[] = new Array(30).fill(0);
+    // Use log index as a rough proxy -- each log has a timestamp string
+    // We'll bucket by relative position in the last 30 entries
+    const recentLogs = logs.slice(-300);
+    const bucketSize = Math.max(1, Math.ceil(recentLogs.length / 30));
+    for (let i = 0; i < 30; i++) {
+      const start = i * bucketSize;
+      const end = Math.min(start + bucketSize, recentLogs.length);
+      buckets[i] = end - start;
+    }
+    const max = Math.max(...buckets, 1);
+    return buckets.map((v) => v / max);
+  }, [logs.length]);
+
+  const FILTERS: { label: string; value: LogFilter; color: string }[] = [
+    { label: 'All', value: 'all', color: '' },
+    { label: 'Info', value: 'info', color: '' },
+    { label: 'Warn', value: 'warn', color: 'text-amber-400' },
+    { label: 'Error', value: 'error', color: 'text-red-400' },
+    { label: 'Stderr', value: 'stderr', color: 'text-orange-400' },
   ];
 
   return (
     <div
       style={{ height: `${height}px` }}
-      className="fixed bottom-0 left-0 right-0 bg-[#050505] border-t border-zinc-800 flex flex-col z-40 shadow-[0_-10px_40px_rgba(0,0,0,0.5)]"
+      className="fixed bottom-0 left-0 right-0 bg-[#050505] border-t border-zinc-800/60 flex flex-col z-40 shadow-[0_-10px_40px_rgba(0,0,0,0.5)]"
     >
-      {/* Drag Handle */}
+      {/* Drag Handle with grip dots */}
       <div
-        className="h-1.5 w-full bg-zinc-900 hover:bg-emerald-500/50 cursor-row-resize transition-colors flex items-center justify-center group"
+        className="h-2 w-full bg-zinc-900/80 hover:bg-indigo-500/20 cursor-row-resize transition-colors flex items-center justify-center group"
         onMouseDown={(e) => {
           const startY = e.clientY;
           const startHeight = height;
@@ -69,10 +88,9 @@ export const Console: React.FC = () => {
           document.addEventListener('mouseup', onMouseUp);
         }}
       >
-        <GripHorizontal
-          size={12}
-          className="text-zinc-600 group-hover:text-zinc-300 opacity-0 group-hover:opacity-100 transition-opacity"
-        />
+        <div className="grip-dots">
+          <span />
+        </div>
       </div>
 
       {/* Toolbar */}
@@ -94,10 +112,10 @@ export const Console: React.FC = () => {
               <button
                 key={f.value}
                 onClick={() => setFilter(f.value)}
-                className={`px-2 py-0.5 text-[10px] rounded-md transition-colors ${
+                className={`px-2 py-0.5 text-[10px] rounded-md transition-all duration-150 ${
                   filter === f.value
-                    ? 'bg-zinc-800 text-zinc-200'
-                    : 'text-zinc-600 hover:text-zinc-400'
+                    ? 'bg-zinc-800 text-zinc-200 shadow-sm'
+                    : `text-zinc-600 hover:text-zinc-400 hover:bg-white/[0.03] ${f.color}`
                 }`}
               >
                 {f.label}
@@ -113,17 +131,17 @@ export const Console: React.FC = () => {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Filter logs..."
-              className="bg-zinc-900 border border-zinc-800 rounded-md pl-8 pr-3 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-emerald-500/50 w-40"
+              className="bg-zinc-900/80 border border-zinc-800 rounded-md pl-8 pr-3 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/30 w-40 transition-all"
             />
           </div>
 
           {/* Auto-scroll toggle */}
           <button
             onClick={() => setAutoScroll(!autoScroll)}
-            className={`p-1.5 rounded-md border transition-colors flex items-center gap-1.5 text-xs ${
+            className={`p-1.5 rounded-md border transition-all duration-150 flex items-center gap-1.5 text-xs active:scale-90 ${
               autoScroll
                 ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
-                : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300'
+                : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/80'
             }`}
           >
             {autoScroll ? <Lock size={12} /> : <Unlock size={12} />}
@@ -132,7 +150,7 @@ export const Console: React.FC = () => {
           {/* Copy all */}
           <button
             onClick={handleCopyAll}
-            className="p-1.5 rounded-md border border-zinc-800 text-zinc-500 hover:text-zinc-300 transition-colors"
+            className="p-1.5 rounded-md border border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/80 active:scale-90 transition-all duration-150"
             title="Copy all logs"
           >
             <Copy size={12} />
@@ -141,7 +159,7 @@ export const Console: React.FC = () => {
           {/* Clear */}
           <button
             onClick={clearLogs}
-            className="p-1.5 rounded-md border border-zinc-800 text-zinc-500 hover:text-red-400 transition-colors"
+            className="p-1.5 rounded-md border border-zinc-800 text-zinc-500 hover:text-red-400 hover:bg-red-500/5 hover:border-red-500/20 active:scale-90 transition-all duration-150"
             title="Clear logs"
           >
             <Trash2 size={12} />
@@ -152,7 +170,7 @@ export const Console: React.FC = () => {
       {/* Logs Area */}
       <div
         ref={scrollRef}
-        className="flex-1 overflow-y-auto font-mono text-xs py-2 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:bg-zinc-800 [&::-webkit-scrollbar-track]:bg-transparent"
+        className="flex-1 overflow-y-auto font-mono text-xs py-2 scrollbar-hide"
       >
         {filteredLogs.length === 0 ? (
           <div className="px-4 py-8 text-center text-zinc-600 italic">
@@ -162,19 +180,27 @@ export const Console: React.FC = () => {
           </div>
         ) : (
           filteredLogs.map((log, index) => {
-            // Stage transition detection for visual dividers
-            const isStageTransition =
-              log.message.match(/(?:===\s*Stage|Running\s+stage|Stage\s+\d+\s+completed)/i);
+            // Stage transition detection
+            const isStageTransition = log.message.match(
+              /(?:===\s*Stage|Running\s+stage|Stage\s+\d+\s+completed)/i,
+            );
+
+            // Stage name line detection (e.g. "Stage 5: Rotation Priors")
+            const isStageNameLine = log.message.match(/^Stage\s+\d+[:\s]/i);
+
+            const isError = log.level === 'error';
 
             if (isStageTransition) {
               return (
-                <div
-                  key={index}
-                  className="w-full my-2 bg-emerald-500/10 border-y border-emerald-500/20 py-1.5 px-4 flex items-center"
-                >
-                  <span className="text-emerald-400 font-bold uppercase tracking-widest text-[10px]">
-                    {log.message}
-                  </span>
+                <div key={index} className="w-full my-2">
+                  {/* Gradient separator bar */}
+                  <div className="h-px w-full bg-gradient-to-r from-transparent via-emerald-500/30 to-transparent" />
+                  <div className="bg-emerald-500/[0.06] py-1.5 px-4 flex items-center">
+                    <span className="text-emerald-400 font-bold uppercase tracking-widest text-[10px]">
+                      {log.message}
+                    </span>
+                  </div>
+                  <div className="h-px w-full bg-gradient-to-r from-transparent via-emerald-500/30 to-transparent" />
                 </div>
               );
             }
@@ -182,12 +208,17 @@ export const Console: React.FC = () => {
             return (
               <div
                 key={index}
-                className="group flex items-start px-4 py-0.5 hover:bg-zinc-900/50 transition-colors"
+                className={`group flex items-start px-4 py-0.5 hover:bg-white/[0.02] transition-colors ${
+                  isError ? 'border-l-2 border-red-500/40 bg-red-500/[0.02]' : ''
+                }`}
               >
-                <div className="w-10 text-zinc-700 select-none text-right pr-4 border-r border-zinc-800/50 mr-4 shrink-0">
+                {/* Line number */}
+                <div className="w-10 text-zinc-700 select-none text-right pr-4 border-r border-zinc-800/30 mr-4 shrink-0 font-mono tabular-nums">
                   {index + 1}
                 </div>
-                <div className="w-20 text-zinc-500 shrink-0 select-none">{log.timestamp}</div>
+                {/* Timestamp */}
+                <div className="w-20 text-zinc-600 shrink-0 select-none opacity-60">{log.timestamp}</div>
+                {/* Level badge */}
                 <div
                   className={`w-16 shrink-0 font-bold ${
                     log.level === 'error'
@@ -196,21 +227,27 @@ export const Console: React.FC = () => {
                       ? 'text-amber-400'
                       : log.level === 'stderr'
                       ? 'text-orange-400'
-                      : 'text-zinc-400'
+                      : 'text-zinc-500'
                   }`}
                 >
                   [{log.level.toUpperCase()}]
                 </div>
+                {/* Message */}
                 <div
                   className={`flex-1 break-all pr-4 ${
-                    log.level === 'error' ? 'text-red-300' : 'text-zinc-300'
+                    isError
+                      ? 'text-red-300'
+                      : isStageNameLine
+                      ? 'text-emerald-300 font-bold'
+                      : 'text-zinc-300'
                   }`}
                 >
                   {log.message}
                 </div>
+                {/* Copy button */}
                 <button
                   onClick={() => handleCopy(log.message)}
-                  className="opacity-0 group-hover:opacity-100 p-1 text-zinc-500 hover:text-zinc-200 transition-all"
+                  className="opacity-0 group-hover:opacity-100 p-1 text-zinc-600 hover:text-zinc-200 active:scale-90 transition-all duration-150"
                 >
                   <Copy size={12} />
                 </button>
@@ -218,7 +255,50 @@ export const Console: React.FC = () => {
             );
           })
         )}
+
+        {/* Pipeline Complete Banner */}
+        {isComplete && logs.length > 0 && (
+          <div className="mx-4 my-4 relative overflow-hidden rounded-xl border border-emerald-500/20 bg-emerald-500/[0.05] p-4 animate-scaleIn">
+            {/* Confetti-style dots */}
+            <div className="absolute inset-0 overflow-hidden pointer-events-none">
+              {[...Array(12)].map((_, i) => (
+                <div
+                  key={i}
+                  className="absolute w-1.5 h-1.5 rounded-full"
+                  style={{
+                    left: `${8 + i * 8}%`,
+                    top: `${20 + (i % 3) * 25}%`,
+                    background: ['#10b981', '#6366f1', '#f59e0b', '#3b82f6', '#a78bfa', '#34d399'][i % 6],
+                    opacity: 0.6,
+                    animation: `confetti-dot 2s ease-out ${i * 0.1}s infinite`,
+                  }}
+                />
+              ))}
+            </div>
+            <div className="relative text-center">
+              <div className="text-emerald-400 font-bold text-sm tracking-wide">Pipeline Complete</div>
+              <div className="text-zinc-500 text-[10px] mt-1">All 14 stages finished successfully</div>
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* Sparkline log rate bar at bottom */}
+      {sparklineData.length > 0 && (
+        <div className="h-5 border-t border-zinc-800/30 bg-[#0a0a0b] flex items-end px-4 gap-px">
+          <span className="text-[8px] text-zinc-700 mr-2 self-center shrink-0">LOG RATE</span>
+          {sparklineData.map((v, i) => (
+            <div
+              key={i}
+              className="flex-1 bg-indigo-500/30 rounded-t-sm sparkline-bar"
+              style={{
+                height: `${Math.max(1, v * 12)}px`,
+                animationDelay: `${i * 10}ms`,
+              }}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 };
