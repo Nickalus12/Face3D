@@ -634,12 +634,13 @@ function AiSettingsSection() {
   const [showKey, setShowKey] = useState(false);
   const [hasKey, setHasKey] = useState(false);
   const [enabled, setEnabled] = useState(true);
+  const [selectedModel, setSelectedModel] = useState<string>('gemini-2.0-flash');
   const [isValidating, setIsValidating] = useState(false);
   const [validationResult, setValidationResult] = useState<{ valid: boolean; error?: string } | null>(null);
 
   // Load current state from DB on mount
   useEffect(() => {
-    import('../lib/gemini').then(({ getGeminiApiKey, isGeminiEnabled }) => {
+    import('../lib/gemini').then(({ getGeminiApiKey, isGeminiEnabled, getGeminiModel }) => {
       getGeminiApiKey().then(key => {
         if (key) {
           setHasKey(true);
@@ -647,6 +648,7 @@ function AiSettingsSection() {
         }
       }).catch(() => {});
       isGeminiEnabled().then(setEnabled).catch(() => {});
+      getGeminiModel().then(setSelectedModel).catch(() => {});
     }).catch(() => {});
   }, []);
 
@@ -768,12 +770,60 @@ function AiSettingsSection() {
         )}
       </div>
 
+      {/* Model Selection */}
+      {hasKey && (
+        <div>
+          <label className="text-xs font-medium text-zinc-400 block mb-2">
+            AI Model
+          </label>
+          <div className="space-y-2">
+            {[
+              { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash', desc: 'Fast, free tier (15 RPM). Good for routine critique.', badge: 'Free' },
+              { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', desc: 'Higher quality analysis. Better for detailed feedback.', badge: 'Paid' },
+            ].map((m) => (
+              <button
+                key={m.id}
+                onClick={async () => {
+                  setSelectedModel(m.id);
+                  try {
+                    const { setGeminiModel } = await import('../lib/gemini');
+                    await setGeminiModel(m.id as any);
+                  } catch {}
+                }}
+                className={`w-full text-left p-3 rounded-lg border transition-all ${
+                  selectedModel === m.id
+                    ? 'bg-indigo-500/10 border-indigo-500/30 ring-1 ring-indigo-500/20'
+                    : 'bg-zinc-800/50 border-zinc-700/50 hover:bg-zinc-800 hover:border-zinc-600'
+                }`}
+              >
+                <div className="flex items-center justify-between mb-0.5">
+                  <span className={`text-xs font-semibold ${selectedModel === m.id ? 'text-indigo-300' : 'text-zinc-300'}`}>
+                    {m.label}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded ${
+                      m.badge === 'Free'
+                        ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                        : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                    }`}>
+                      {m.badge}
+                    </span>
+                    {selectedModel === m.id && <Check size={12} className="text-indigo-400" />}
+                  </div>
+                </div>
+                <div className="text-[11px] text-zinc-500">{m.desc}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Info */}
       <div className="p-3 rounded-lg bg-zinc-800/30 border border-zinc-800/50">
         <p className="text-[11px] text-zinc-500 leading-relaxed">
           Get a free API key at{' '}
           <span className="text-indigo-400">aistudio.google.com</span>.
-          Gemini Flash has a free tier (15 requests/min). Your key is stored locally in the app database — never sent anywhere except Google's API.
+          Gemini Flash has a free tier (15 requests/min). Gemini Pro provides higher quality analysis but may have usage costs. Your key is stored locally — never sent anywhere except Google's API.
         </p>
       </div>
     </div>

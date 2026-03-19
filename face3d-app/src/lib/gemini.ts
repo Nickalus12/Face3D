@@ -1,18 +1,39 @@
 /**
  * Gemini AI Integration for Face3D
  *
- * Provides two capabilities:
+ * Provides three capabilities:
  * 1. Quality Critique — analyzes turntable renders to grade reconstruction quality
  * 2. Error Diagnosis — translates pipeline errors into plain-English fixes
+ * 3. Deep Analysis — uses Gemini Pro for higher-quality architectural/quality insights
+ *
+ * Supports multiple Gemini models:
+ * - gemini-2.0-flash (default, free tier, 15 RPM) — fast critique & error diagnosis
+ * - gemini-3.1-pro-preview — higher quality analysis when needed
  *
  * All calls are optional and gated on having an API key stored in the DB.
- * Uses Gemini 2.0 Flash (free tier, 15 RPM).
  */
 
 import { getSetting, storeAiCritique, setSetting } from './database';
 
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const DEFAULT_MODEL = 'gemini-2.0-flash';
+
+export const GEMINI_MODELS = {
+  'gemini-2.0-flash': {
+    id: 'gemini-2.0-flash',
+    label: 'Gemini 2.0 Flash',
+    description: 'Fast, free tier (15 RPM). Good for routine critique.',
+    tier: 'free' as const,
+  },
+  'gemini-3.1-pro-preview': {
+    id: 'gemini-3.1-pro-preview',
+    label: 'Gemini 3.1 Pro',
+    description: 'Higher quality analysis. Better for detailed feedback.',
+    tier: 'paid' as const,
+  },
+} as const;
+
+export type GeminiModelId = keyof typeof GEMINI_MODELS;
 
 // ── API Key Management ─────────────────────────────────────────
 
@@ -38,6 +59,18 @@ export async function isGeminiEnabled(): Promise<boolean> {
 
 export async function setAiFeaturesEnabled(enabled: boolean): Promise<void> {
   await setSetting('ai_features_enabled', enabled ? 'true' : 'false');
+}
+
+// ── Model Selection ─────────────────────────────────────────────
+
+export async function getGeminiModel(): Promise<GeminiModelId> {
+  const model = await getSetting('gemini_model');
+  if (model && model in GEMINI_MODELS) return model as GeminiModelId;
+  return DEFAULT_MODEL as GeminiModelId;
+}
+
+export async function setGeminiModel(model: GeminiModelId): Promise<void> {
+  await setSetting('gemini_model', model);
 }
 
 // ── Core API Call ──────────────────────────────────────────────
@@ -117,12 +150,15 @@ export interface QualityCritique {
 export async function critiqueRenders(
   imageBase64s: string[],
   sessionId: string,
+  modelOverride?: GeminiModelId,
 ): Promise<QualityCritique | null> {
   const apiKey = await getGeminiApiKey();
   if (!apiKey) return null;
 
   const enabled = await isGeminiEnabled();
   if (!enabled) return null;
+
+  const model = modelOverride ?? await getGeminiModel();
 
   const parts: GeminiPart[] = [
     {
@@ -144,7 +180,7 @@ Respond in this exact JSON format (no markdown, no code blocks):
   ];
 
   try {
-    const raw = await callGemini(parts, apiKey);
+    const raw = await callGemini(parts, apiKey, model);
     // Parse JSON from response (strip any markdown wrapping)
     const jsonStr = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     const critique: QualityCritique = JSON.parse(jsonStr);
@@ -155,7 +191,7 @@ Respond in this exact JSON format (no markdown, no code blocks):
       type: 'quality_critique',
       grade: critique.grade,
       feedback: JSON.stringify(critique),
-      model: DEFAULT_MODEL,
+      model,
     });
 
     // Update session quality grade
@@ -194,12 +230,15 @@ export async function diagnoseError(
   errorLog: string,
   stageName: string,
   sessionId?: string,
+  modelOverride?: GeminiModelId,
 ): Promise<ErrorDiagnosis | null> {
   const apiKey = await getGeminiApiKey();
   if (!apiKey) return null;
 
   const enabled = await isGeminiEnabled();
   if (!enabled) return null;
+
+  const model = modelOverride ?? await getGeminiModel();
 
   // Truncate very long error logs
   const truncated = errorLog.length > 3000 ? errorLog.slice(-3000) : errorLog;
@@ -221,7 +260,7 @@ Severity levels: low (cosmetic), medium (degraded output), high (stage failed), 
   ];
 
   try {
-    const raw = await callGemini(parts, apiKey);
+    const raw = await callGemini(parts, apiKey, model);
     const jsonStr = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     const diagnosis: ErrorDiagnosis = JSON.parse(jsonStr);
 
@@ -232,7 +271,7 @@ Severity levels: low (cosmetic), medium (degraded output), high (stage failed), 
         type: 'error_diagnosis',
         grade: diagnosis.severity,
         feedback: JSON.stringify(diagnosis),
-        model: DEFAULT_MODEL,
+        model,
       });
     }
 
