@@ -415,9 +415,23 @@ def extract_frames(
 
     # Use select filter for efficient uniform sampling.  vsync=vfr ensures
     # only selected frames are written (avoids duplicated output frames).
+    # Downscale to 1920px wide to avoid massive 8K PNGs (~30MB each).
+    # DA3 processes at 504px anyway, so full 8K is wasted.
     select_expr = f"not(mod(n\\,{frame_step}))"
+    vf_parts = [f"select='{select_expr}'"]
+
+    # Downscale if wider than 1920px (keeps aspect ratio)
+    if probe.get("streams"):
+        for s in probe["streams"]:
+            if s.get("codec_type") == "video":
+                w = int(s.get("width", 0))
+                if w > 1920:
+                    vf_parts.append("scale=1920:-2")
+                    logger.info("Downscaling %dx to 1920px wide during extraction", w)
+                break
+
     cmd.extend([
-        "-vf", f"select='{select_expr}'",
+        "-vf", ",".join(vf_parts),
         "-vsync", "vfr",
         "-vframes", str(max_frames),
         "-pix_fmt", "rgb24",
@@ -528,9 +542,16 @@ def extract_frames_motion_based(
         hwaccel_flags = _hwaccel_input_flags()
         cmd = ["ffmpeg", "-y"]
         cmd.extend(hwaccel_flags)
+        # Downscale during scene extraction if video is wider than 1920px
+        scene_vf = f"select='gt(scene\\,{scene_threshold})'"
+        probe = _probe_video(video_path)
+        for s in probe.get("streams", []):
+            if s.get("codec_type") == "video" and int(s.get("width", 0)) > 1920:
+                scene_vf += ",scale=1920:-2"
+                break
         cmd.extend([
             "-i", str(video_path),
-            "-vf", f"select='gt(scene\\,{scene_threshold})'",
+            "-vf", scene_vf,
             "-vsync", "vfr",
             "-vframes", str(max_frames),
             "-pix_fmt", "rgb24",
@@ -611,9 +632,15 @@ def extract_frames_motion_based(
                 hwaccel_flags = _hwaccel_input_flags()
                 cmd = ["ffmpeg", "-y"]
                 cmd.extend(hwaccel_flags)
+                # Downscale if 8K+ during supplement extraction
+                supp_vf = f"select='not(mod(n\\,{frame_step}))'"
+                for s in probe.get("streams", []):
+                    if s.get("codec_type") == "video" and int(s.get("width", 0)) > 1920:
+                        supp_vf += ",scale=1920:-2"
+                        break
                 cmd.extend([
                     "-i", str(video_path),
-                    "-vf", f"select='not(mod(n\\,{frame_step}))'",
+                    "-vf", supp_vf,
                     "-vsync", "vfr",
                     "-vframes", str(remaining_budget),
                     "-pix_fmt", "rgb24",
@@ -625,7 +652,7 @@ def extract_frames_motion_based(
                     if hwaccel_flags:
                         cmd_cpu = ["ffmpeg", "-y", "-i", str(video_path)]
                         cmd_cpu.extend([
-                            "-vf", f"select='not(mod(n\\,{frame_step}))'",
+                            "-vf", supp_vf,
                             "-vsync", "vfr",
                             "-vframes", str(remaining_budget),
                             "-pix_fmt", "rgb24",
@@ -707,9 +734,18 @@ def extract_frames_motion_based(
         cap.release()
         return saved_paths
 
+    # Determine if we need to downscale (8K → 1080p)
+    save_w, save_h = w, h
+    if w > 1920:
+        save_w = 1920
+        save_h = int(h * 1920 / w)
+        save_h = save_h - (save_h % 2)  # ensure even
+        logger.info("Downscaling frames from %dx%d to %dx%d during extraction", w, h, save_w, save_h)
+
     if saved_count == 0:
         first_path = output_dir / f"frame_{saved_count:06d}.png"
-        cv2.imwrite(str(first_path), first_frame)
+        save_frame = cv2.resize(first_frame, (save_w, save_h)) if save_w != w else first_frame
+        cv2.imwrite(str(first_path), save_frame)
         saved_paths.append(first_path)
         saved_count += 1
 
@@ -730,7 +766,8 @@ def extract_frames_motion_based(
 
         if flow_mag >= effective_threshold:
             out_path = output_dir / f"frame_{saved_count:06d}.png"
-            cv2.imwrite(str(out_path), frame)
+            save_frame = cv2.resize(frame, (save_w, save_h)) if save_w != w else frame
+            cv2.imwrite(str(out_path), save_frame)
             saved_paths.append(out_path)
             saved_count += 1
             prev_gray = curr_gray
