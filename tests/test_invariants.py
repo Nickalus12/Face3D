@@ -145,7 +145,7 @@ if HAS_HYPOTHESIS:
     @settings(max_examples=30)
     def test_depth_map_positive_property(depth):
         """Any depth map with positive inputs stays positive after operations."""
-        from conftest import Invariants
+        from helpers import Invariants
 
         Invariants.assert_valid_depth_map(depth)
 
@@ -164,6 +164,7 @@ if HAS_HYPOTHESIS:
     @settings(max_examples=20, suppress_health_check=[HealthCheck.too_slow])
     def test_gaussian_model_arbitrary_size(n):
         """GaussianModel works correctly for any size 1..200."""
+        pytest.importorskip("open3d")
         import torch
         from splatting.initializer import GaussianModel, SH_COEFFS
 
@@ -189,6 +190,7 @@ if HAS_HYPOTHESIS:
     @settings(max_examples=10)
     def test_gaussian_clone_independence(n):
         """Modifying a clone never affects the original."""
+        pytest.importorskip("open3d")
         import torch
         from splatting.initializer import GaussianModel, SH_COEFFS
 
@@ -248,7 +250,7 @@ if HAS_HYPOTHESIS:
     def test_madgwick_rotation_matrix_proper(accel, gyro):
         """Rotation matrix from Madgwick is always proper (det=1, orthogonal)."""
         from sensors.orientation import MadgwickFilter
-        from conftest import Invariants
+        from helpers import Invariants
 
         assume(np.linalg.norm(accel) > 0.1)
 

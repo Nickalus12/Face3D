@@ -32,7 +32,7 @@ class TestPhotometricQuality:
 
     def test_psnr_identical_images(self):
         """PSNR of identical images should be infinity."""
-        from conftest import compute_psnr
+        from helpers import compute_psnr
 
         img = np.random.default_rng(1).integers(0, 256, size=(64, 64, 3), dtype=np.uint8)
         psnr = compute_psnr(img, img)
@@ -40,7 +40,7 @@ class TestPhotometricQuality:
 
     def test_psnr_known_value(self):
         """PSNR between known images should match expected range."""
-        from conftest import compute_psnr
+        from helpers import compute_psnr
 
         rng = np.random.default_rng(2)
         img1 = rng.integers(100, 200, size=(64, 64, 3), dtype=np.uint8)
@@ -53,7 +53,7 @@ class TestPhotometricQuality:
 
     def test_ssim_identical_images(self):
         """SSIM of identical images should be ~1.0."""
-        from conftest import compute_ssim
+        from helpers import compute_ssim
 
         img = np.random.default_rng(3).integers(50, 200, size=(64, 64, 3), dtype=np.uint8)
         ssim = compute_ssim(img, img)
@@ -61,7 +61,7 @@ class TestPhotometricQuality:
 
     def test_ssim_dissimilar_images(self):
         """SSIM of very different images should be low."""
-        from conftest import compute_ssim
+        from helpers import compute_ssim
 
         rng = np.random.default_rng(4)
         img1 = np.full((64, 64, 3), 50, dtype=np.uint8)
@@ -148,8 +148,9 @@ class TestGaussianQuality:
 
     def test_initialized_gaussians_from_colmap(self, sample_colmap_model):
         """Gaussians from COLMAP should have valid parameters."""
+        pytest.importorskip("open3d")
         from splatting.initializer import initialize_from_colmap_sparse
-        from conftest import Invariants
+        from helpers import Invariants
 
         model = initialize_from_colmap_sparse(sample_colmap_model)
         Invariants.assert_valid_gaussians(model)
@@ -192,7 +193,7 @@ class TestGeometricQuality:
     def test_point_cloud_face_scale(self, sample_colmap_model):
         """Reconstructed points should be at human-face scale."""
         from utils.colmap_io import read_points3d_binary
-        from conftest import Invariants
+        from helpers import Invariants
 
         points = read_points3d_binary(sample_colmap_model / "points3D.bin")
         xyz = np.array([pt.xyz for pt in points.values()])
@@ -226,6 +227,7 @@ class TestPipelineConsistency:
 
     def test_gaussian_init_deterministic(self, sample_colmap_model):
         """Initializing Gaussians from the same input twice is deterministic."""
+        pytest.importorskip("open3d")
         from splatting.initializer import initialize_from_colmap_sparse
 
         model1 = initialize_from_colmap_sparse(sample_colmap_model)

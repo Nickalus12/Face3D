@@ -32,8 +32,11 @@ import pytest
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = PROJECT_ROOT / "src"
+TESTS_DIR = PROJECT_ROOT / "tests"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
 
 # Expose PROJECT_ROOT to all tests
 MODELS_DIR = PROJECT_ROOT / "Models"
@@ -288,9 +291,13 @@ def sample_gaussians():
     """Create a small GaussianModel (50 Gaussians) for quick tests.
 
     All parameters are valid: unit quaternions, finite positions, log-scales.
+    Skips if open3d or torch not available.
     """
-    import torch
-    from splatting.initializer import GaussianModel, SH_COEFFS
+    torch = pytest.importorskip("torch")
+    try:
+        from splatting.initializer import GaussianModel, SH_COEFFS
+    except ImportError as exc:
+        pytest.skip(f"Cannot import GaussianModel: {exc}")
 
     rng = np.random.default_rng(77)
     n = 50

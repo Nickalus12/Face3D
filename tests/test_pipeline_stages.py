@@ -289,7 +289,7 @@ class TestColmapIO:
     def test_read_images_binary_quaternion_invariant(self, sample_colmap_model):
         """All image quaternions must be unit-length."""
         from utils.colmap_io import read_images_binary
-        from conftest import Invariants
+        from helpers import Invariants
 
         images = read_images_binary(sample_colmap_model / "images.bin")
         assert len(images) == 5
@@ -326,7 +326,7 @@ class TestColmapIO:
     def test_qvec_rotmat_round_trip(self):
         """Quaternion -> rotation matrix -> quaternion is identity (up to sign)."""
         from utils.colmap_io import qvec_to_rotmat, rotmat_to_qvec
-        from conftest import Invariants
+        from helpers import Invariants
 
         qvec = np.array([0.5, 0.5, 0.5, 0.5], dtype=np.float64)
         R = qvec_to_rotmat(qvec)
@@ -340,12 +340,12 @@ class TestColmapIO:
         np.array([1, 0, 0, 0], dtype=np.float64),        # identity
         np.array([0, 1, 0, 0], dtype=np.float64),        # 180 deg around x
         np.array([0, 0, 1, 0], dtype=np.float64),        # 180 deg around y
-        np.array([0.707107, 0.707107, 0, 0], dtype=np.float64),  # 90 deg around x
+        np.array([np.sqrt(0.5), np.sqrt(0.5), 0, 0], dtype=np.float64),  # 90 deg around x
     ])
     def test_qvec_rotmat_parametric(self, qvec):
         """Parametric rotation round-trip for common orientations."""
         from utils.colmap_io import qvec_to_rotmat, rotmat_to_qvec
-        from conftest import Invariants
+        from helpers import Invariants
 
         R = qvec_to_rotmat(qvec)
         Invariants.assert_valid_rotation_matrix(R)
@@ -390,7 +390,11 @@ class TestDepthEstimation:
 
     def test_depth_result_dataclass(self):
         """DepthResult dataclass fields and defaults."""
-        from depth.depth_estimator import DepthResult
+        pytest.importorskip("torch", reason="PyTorch required for depth estimator")
+        try:
+            from depth.depth_estimator import DepthResult
+        except ImportError as exc:
+            pytest.skip(f"Cannot import DepthResult: {exc}")
 
         dr = DepthResult(depth=np.zeros((10, 10), dtype=np.float32))
         assert dr.depth.shape == (10, 10)
@@ -400,7 +404,7 @@ class TestDepthEstimation:
 
     def test_depth_map_invariants(self, sample_depth_maps):
         """All synthetic depth maps satisfy depth invariants."""
-        from conftest import Invariants
+        from helpers import Invariants
 
         for path in sample_depth_maps:
             depth = np.load(str(path))
@@ -446,8 +450,9 @@ class TestFLAMEModel:
 
     def test_batch_rodrigues_identity(self):
         """Zero axis-angle -> identity rotation matrix."""
+        torch = pytest.importorskip("torch")
+        pytest.importorskip("mediapipe", reason="mediapipe required for reconstruction module")
         from reconstruction.flame_model import _batch_rodrigues
-        import torch
 
         R = _batch_rodrigues(torch.zeros(1, 3))
         assert R.shape == (1, 3, 3)
@@ -460,9 +465,10 @@ class TestFLAMEModel:
     ])
     def test_batch_rodrigues_produces_valid_rotation(self, axis, angle):
         """Rodrigues' formula always produces a proper rotation matrix."""
+        torch = pytest.importorskip("torch")
+        pytest.importorskip("mediapipe", reason="mediapipe required for reconstruction module")
         from reconstruction.flame_model import _batch_rodrigues
-        from conftest import Invariants
-        import torch
+        from helpers import Invariants
 
         rotvec = torch.tensor([np.array(axis, dtype=np.float32) * angle]).float()
         R = _batch_rodrigues(rotvec)[0].numpy()
@@ -485,7 +491,7 @@ class TestGaussianInitializer:
 
     def test_gaussian_model_invariants(self, sample_gaussians):
         """Validate Gaussian parameter invariants."""
-        from conftest import Invariants
+        from helpers import Invariants
         Invariants.assert_valid_gaussians(sample_gaussians)
 
     def test_gaussian_model_clone(self, sample_gaussians):
@@ -507,8 +513,9 @@ class TestGaussianInitializer:
 
     def test_initialize_from_colmap_sparse(self, sample_colmap_model):
         """Initialize Gaussians from synthetic COLMAP sparse model."""
+        pytest.importorskip("open3d")
         from splatting.initializer import initialize_from_colmap_sparse
-        from conftest import Invariants
+        from helpers import Invariants
 
         model = initialize_from_colmap_sparse(sample_colmap_model)
         assert model.num_gaussians == 100
@@ -518,6 +525,7 @@ class TestGaussianInitializer:
 
     def test_rgb_to_sh0_invertible(self):
         """DC SH conversion is invertible within floating precision."""
+        pytest.importorskip("open3d")
         from splatting.initializer import _rgb_to_sh0
 
         C0 = 0.28209479177387814
@@ -528,8 +536,9 @@ class TestGaussianInitializer:
 
     def test_initialize_from_colmap_sparse_face_scale(self, sample_colmap_model):
         """Initialized Gaussians should be at human-face scale."""
+        pytest.importorskip("open3d")
         from splatting.initializer import initialize_from_colmap_sparse
-        from conftest import Invariants
+        from helpers import Invariants
 
         model = initialize_from_colmap_sparse(sample_colmap_model)
         positions = model.positions.numpy()
@@ -542,6 +551,8 @@ class TestGaussianTrainer:
 
     def test_train_config_defaults(self):
         """TrainConfig has sensible defaults."""
+        pytest.importorskip("torch")
+        pytest.importorskip("open3d")
         from splatting.trainer import TrainConfig
 
         config = TrainConfig()
@@ -567,7 +578,7 @@ class TestPlyExport:
     def test_ply_export_header(self, tmp_path, sample_gaussians):
         """Exported PLY has valid header with correct vertex count."""
         from splatting.initializer import _save_gaussians_ply
-        from conftest import Invariants
+        from helpers import Invariants
 
         ply_path = tmp_path / "test_gaussians.ply"
         _save_gaussians_ply(sample_gaussians, ply_path)
@@ -590,7 +601,7 @@ class TestPlyExport:
     def test_export_gaussians_ply_wrapper(self, tmp_path, sample_gaussians):
         """Public export_gaussians_ply wrapper creates valid file."""
         from splatting.exporter import export_gaussians_ply
-        from conftest import Invariants
+        from helpers import Invariants
 
         out_path = tmp_path / "exported.ply"
         export_gaussians_ply(sample_gaussians, out_path)

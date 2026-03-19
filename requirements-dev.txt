@@ -1,0 +1,19 @@
+# Face3D development and testing dependencies
+# Install: pip install -r requirements-dev.txt
+
+# --- Core testing ---
+pytest>=7.0
+pytest-benchmark>=4.0
+pytest-xdist>=3.0            # Parallel test execution: pytest -n auto
+pytest-cov>=4.0              # Coverage: pytest --cov=src --cov-report=html
+
+# --- Property-based testing ---
+hypothesis>=6.80             # Fuzzing / property-based tests
+hypothesis-torch>=0.1        # PyTorch tensor strategies (optional)
+
+# --- Reporting ---
+pytest-html>=4.0             # HTML test reports: pytest --html=report.html
+
+# --- Code quality ---
+ruff>=0.3                    # Fast linter + formatter
+mypy>=1.8                    # Static type checking

@@ -113,7 +113,7 @@ class TestOrientationEstimation:
     def test_madgwick_rotation_matrix_valid(self, sample_imu_data):
         """Rotation matrix from Madgwick is always a proper rotation."""
         from sensors.orientation import MadgwickFilter
-        from conftest import Invariants
+        from helpers import Invariants
 
         filt = MadgwickFilter(sample_rate=100.0, beta=0.1)
         accel = sample_imu_data["accel_xyz"]
@@ -126,20 +126,20 @@ class TestOrientationEstimation:
         Invariants.assert_valid_rotation_matrix(R)
 
     def test_complementary_filter_identity(self):
-        """Complementary filter starts near identity after first update."""
+        """Complementary filter starts near zero Euler angles for gravity-aligned input."""
         from sensors.orientation import ComplementaryFilter
 
         filt = ComplementaryFilter(alpha=0.98)
-        # Pure gravity in -z -> roll=0, pitch=0
-        filt.update(np.array([0.0, 0.0, -9.81]), np.zeros(3), dt=0.01)
+        # Pure gravity in +z (sensor at rest, z-up convention)
+        filt.update(np.array([0.0, 0.0, 9.81]), np.zeros(3), dt=0.01)
         euler = filt.get_euler()
-        assert abs(euler[0]) < 0.1  # roll near 0
-        assert abs(euler[1]) < 0.1  # pitch near 0
+        assert abs(euler[0]) < 0.1, f"Roll should be near 0, got {euler[0]}"
+        assert abs(euler[1]) < 0.1, f"Pitch should be near 0, got {euler[1]}"
 
     def test_compute_rotations_madgwick(self, sample_imu_data):
         """compute_rotations (Madgwick) produces valid rotation matrices."""
         from sensors.orientation import compute_rotations
-        from conftest import Invariants
+        from helpers import Invariants
 
         rotations = compute_rotations(sample_imu_data, sample_rate=100.0)
         assert rotations.shape == (100, 3, 3)
@@ -151,7 +151,7 @@ class TestOrientationEstimation:
     def test_compute_rotations_complementary(self, sample_imu_data):
         """compute_rotations (complementary) produces valid rotation matrices."""
         from sensors.orientation import compute_rotations
-        from conftest import Invariants
+        from helpers import Invariants
 
         rotations = compute_rotations(
             sample_imu_data, sample_rate=100.0, use_complementary=True,
@@ -181,7 +181,7 @@ class TestOrientationEstimation:
     def test_interpolate_rotations_slerp(self, sample_imu_data):
         """SLERP interpolation preserves rotation matrix validity."""
         from sensors.orientation import compute_rotations, interpolate_rotations_to_frames
-        from conftest import Invariants
+        from helpers import Invariants
 
         rotations = compute_rotations(sample_imu_data, sample_rate=100.0)
         imu_ts = sample_imu_data["timestamps"]
@@ -289,7 +289,7 @@ class TestSensorLoggerParser:
     def test_orientation_quaternion_validity(self, tmp_path):
         """Orientation quaternions from parsed ZIP are normalized."""
         from sensors.sensor_logger import parse_sensor_logger_zip
-        from conftest import Invariants
+        from helpers import Invariants
 
         zip_path = self._create_sensor_zip(tmp_path, num_samples=100)
         npz_path, _ = parse_sensor_logger_zip(zip_path, tmp_path / "output")
