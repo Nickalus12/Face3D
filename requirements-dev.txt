@@ -14,6 +14,33 @@ hypothesis-torch>=0.1        # PyTorch tensor strategies (optional)
 # --- Reporting ---
 pytest-html>=4.0             # HTML test reports: pytest --html=report.html
 
+# --- Snapshot testing ---
+syrupy>=4.0                  # Snapshot / golden-file regression tests
+
+# --- Data validation ---
+pandera>=0.18                    # Schema-based data validation contracts
+
+# --- Mutation testing ---
+mutmut>=2.4                  # Mutation testing: mutmut run
+
+# --- Performance (optional) ---
+numba>=0.59                  # JIT compilation for CPU-bound hot loops
+triton>=2.1                  # Custom GPU kernels (bundled with PyTorch 2.x on Linux)
+
+# --- ONNX / TensorRT (optional, for inference acceleration) ---
+onnx>=1.14                   # ONNX model format
+onnxruntime-gpu>=1.16        # ONNX Runtime with CUDA/TRT execution providers
+# tensorrt                   # NVIDIA TensorRT (install via NVIDIA SDK, not pip)
+# torch2trt                  # Simple PyTorch->TensorRT wrapper (pip install torch2trt)
+
+# --- Physics-aware mesh refinement (optional) ---
+taichi>=1.7                  # GPU-accelerated mesh refinement (falls back to numpy)
+
+# --- Gaussian Splatting compression (optional) ---
+DracoPy>=1.4                 # Direct Draco encoding for point clouds / meshes
+# gaussian-splatting>=0.1    # Draco GS compression via gscompressor (optional)
+
 # --- Code quality ---
 ruff>=0.3                    # Fast linter + formatter
-mypy>=1.8                    # Static type checking
+ty>=0.0.20                   # Astral's Rust-based type checker (replaces mypy, 10-100x faster)
+mypy>=1.8                    # Legacy type checking (kept as fallback)

@@ -1,0 +1,824 @@
+# serializer version: 1
+# name: TestColmapSnapshots.test_camera_intrinsics_matrix
+  dict({
+    'K': list([
+      list([
+        525.0,
+        0.0,
+        320.0,
+      ]),
+      list([
+        0.0,
+        525.0,
+        240.0,
+      ]),
+      list([
+        0.0,
+        0.0,
+        1.0,
+      ]),
+    ]),
+  })
+# ---
+# name: TestColmapSnapshots.test_cameras_snapshot
+  dict({
+    'cam_1': dict({
+      'height': 480,
+      'model': 'PINHOLE',
+      'params': list([
+        525.0,
+        525.0,
+        320.0,
+        240.0,
+      ]),
+      'width': 640,
+    }),
+    'cam_2': dict({
+      'height': 480,
+      'model': 'PINHOLE',
+      'params': list([
+        525.0,
+        525.0,
+        320.0,
+        240.0,
+      ]),
+      'width': 640,
+    }),
+    'cam_3': dict({
+      'height': 480,
+      'model': 'PINHOLE',
+      'params': list([
+        525.0,
+        525.0,
+        320.0,
+        240.0,
+      ]),
+      'width': 640,
+    }),
+    'cam_4': dict({
+      'height': 480,
+      'model': 'PINHOLE',
+      'params': list([
+        525.0,
+        525.0,
+        320.0,
+        240.0,
+      ]),
+      'width': 640,
+    }),
+    'cam_5': dict({
+      'height': 480,
+      'model': 'PINHOLE',
+      'params': list([
+        525.0,
+        525.0,
+        320.0,
+        240.0,
+      ]),
+      'width': 640,
+    }),
+    'num_cameras': 5,
+  })
+# ---
+# name: TestColmapSnapshots.test_images_snapshot
+  dict({
+    'img_1': dict({
+      'camera_id': 1,
+      'name': 'frame_000000.png',
+      'num_points2d': 10,
+      'qvec': list([
+        0.0,
+        -0.707107,
+        -0.0,
+        0.707107,
+      ]),
+      'tvec': list([
+        0.0,
+        0.0,
+        2.0,
+      ]),
+    }),
+    'img_2': dict({
+      'camera_id': 2,
+      'name': 'frame_000001.png',
+      'num_points2d': 10,
+      'qvec': list([
+        0.0,
+        0.92388,
+        0.0,
+        -0.382683,
+      ]),
+      'tvec': list([
+        -0.0,
+        0.0,
+        2.0,
+      ]),
+    }),
+    'img_3': dict({
+      'camera_id': 3,
+      'name': 'frame_000002.png',
+      'num_points2d': 10,
+      'qvec': list([
+        0.0,
+        1.0,
+        0.0,
+        -0.0,
+      ]),
+      'tvec': list([
+        0.0,
+        0.0,
+        2.0,
+      ]),
+    }),
+    'img_4': dict({
+      'camera_id': 4,
+      'name': 'frame_000003.png',
+      'num_points2d': 10,
+      'qvec': list([
+        0.0,
+        0.92388,
+        -0.0,
+        0.382683,
+      ]),
+      'tvec': list([
+        -0.0,
+        0.0,
+        2.0,
+      ]),
+    }),
+    'img_5': dict({
+      'camera_id': 5,
+      'name': 'frame_000004.png',
+      'num_points2d': 10,
+      'qvec': list([
+        0.0,
+        0.707107,
+        -0.0,
+        0.707107,
+      ]),
+      'tvec': list([
+        0.0,
+        0.0,
+        2.0,
+      ]),
+    }),
+    'num_images': 5,
+  })
+# ---
+# name: TestColmapSnapshots.test_points3d_snapshot
+  dict({
+    'error_stats': dict({
+      'dtype': 'float64',
+      'max': 1.995128,
+      'mean': 1.069384,
+      'median': 1.074013,
+      'min': 0.148219,
+      'p10': 0.341691,
+      'p25': 0.547029,
+      'p75': 1.562805,
+      'p90': 1.812642,
+      'shape': list([
+        100,
+      ]),
+      'std': 0.552829,
+    }),
+    'num_points': 100,
+    'xyz_stats': dict({
+      'dtype': 'float64',
+      'max': 0.366989,
+      'mean': -0.000531,
+      'median': 0.006724,
+      'min': -0.395794,
+      'p10': -0.172339,
+      'p25': -0.087557,
+      'p75': 0.096833,
+      'p90': 0.160422,
+      'shape': list([
+        100,
+        3,
+      ]),
+      'std': 0.128578,
+    }),
+  })
+# ---
+# name: TestColorCorrectionSnapshots.test_linear_to_srgb_curve
+  dict({
+    'dtype': 'float32',
+    'max': 1.0,
+    'mean': 0.688974,
+    'median': 0.735355,
+    'min': 0.0,
+    'p10': 0.349171,
+    'p25': 0.537095,
+    'p75': 0.880824,
+    'p90': 0.954687,
+    'shape': list([
+      256,
+    ]),
+    'std': 0.231121,
+  })
+# ---
+# name: TestColorCorrectionSnapshots.test_slog3_to_linear_curve
+  dict({
+    'dtype': 'float32',
+    'max': 38.420933,
+    'mean': 4.314989,
+    'median': 0.41533,
+    'min': 0.0,
+    'p10': 0.001078,
+    'p25': 0.03474,
+    'p75': 4.033157,
+    'p90': 15.605076,
+    'shape': list([
+      256,
+    ]),
+    'std': 8.11626,
+  })
+# ---
+# name: TestColorCorrectionSnapshots.test_slog3_to_srgb_full_pipeline
+  dict({
+    'input': dict({
+      'dtype': 'float32',
+      'max': 0.899982,
+      'mean': 0.498077,
+      'median': 0.49939,
+      'min': 0.100011,
+      'p10': 0.181878,
+      'p25': 0.296774,
+      'p75': 0.696542,
+      'p90': 0.817606,
+      'shape': list([
+        64,
+        64,
+        3,
+      ]),
+      'std': 0.230479,
+    }),
+    'linear': dict({
+      'dtype': 'float32',
+      'max': 15.600056,
+      'mean': 2.126129,
+      'median': 0.412932,
+      'min': 0.001079,
+      'p10': 0.014219,
+      'p25': 0.058176,
+      'p75': 2.487698,
+      'p90': 7.422726,
+      'shape': list([
+        64,
+        64,
+        3,
+      ]),
+      'std': 3.486242,
+    }),
+    'srgb': dict({
+      'dtype': 'float32',
+      'max': 1.0,
+      'mean': 0.273875,
+      'median': 0.177309,
+      'min': 0.000894,
+      'p10': 0.011776,
+      'p25': 0.047666,
+      'p75': 0.435944,
+      'p90': 0.719197,
+      'shape': list([
+        64,
+        64,
+        3,
+      ]),
+      'std': 0.271377,
+    }),
+  })
+# ---
+# name: TestDA3ConfidenceMapSnapshots.test_confidence_map_stats
+  dict({
+    'dtype': 'float32',
+    'max': 1.0,
+    'mean': 0.833414,
+    'median': 0.870185,
+    'min': 0.066445,
+    'p10': 0.632096,
+    'p25': 0.757675,
+    'p75': 0.943739,
+    'p90': 0.979011,
+    'shape': list([
+      480,
+      640,
+    ]),
+    'std': 0.140309,
+  })
+# ---
+# name: TestDepthMapSnapshots.test_depth_map_stats
+  dict({
+    'depth_0': dict({
+      'dtype': 'float32',
+      'max': 4.999997,
+      'mean': 2.752561,
+      'median': 2.753865,
+      'min': 0.500018,
+      'p10': 0.951308,
+      'p25': 1.629036,
+      'p75': 3.877016,
+      'p90': 4.553407,
+      'shape': list([
+        480,
+        640,
+      ]),
+      'std': 1.299371,
+    }),
+    'depth_1': dict({
+      'dtype': 'float32',
+      'max': 4.999995,
+      'mean': 2.750228,
+      'median': 2.750934,
+      'min': 0.500011,
+      'p10': 0.952042,
+      'p25': 1.625915,
+      'p75': 3.873175,
+      'p90': 4.54767,
+      'shape': list([
+        480,
+        640,
+      ]),
+      'std': 1.297964,
+    }),
+    'depth_2': dict({
+      'dtype': 'float32',
+      'max': 4.999992,
+      'mean': 2.745935,
+      'median': 2.741765,
+      'min': 0.500002,
+      'p10': 0.943902,
+      'p25': 1.615222,
+      'p75': 3.875443,
+      'p90': 4.554374,
+      'shape': list([
+        480,
+        640,
+      ]),
+      'std': 1.302313,
+    }),
+    'depth_3': dict({
+      'dtype': 'float32',
+      'max': 4.999998,
+      'mean': 2.752477,
+      'median': 2.749678,
+      'min': 0.500004,
+      'p10': 0.952169,
+      'p25': 1.625419,
+      'p75': 3.881211,
+      'p90': 4.552589,
+      'shape': list([
+        480,
+        640,
+      ]),
+      'std': 1.299652,
+    }),
+    'depth_4': dict({
+      'dtype': 'float32',
+      'max': 4.999992,
+      'mean': 2.751623,
+      'median': 2.753195,
+      'min': 0.500007,
+      'p10': 0.95106,
+      'p25': 1.626925,
+      'p75': 3.878765,
+      'p90': 4.550579,
+      'shape': list([
+        480,
+        640,
+      ]),
+      'std': 1.298872,
+    }),
+  })
+# ---
+# name: TestEdgeCaseSnapshots.test_empty_array
+  dict({
+    'dtype': 'float32',
+    'shape': list([
+      0,
+    ]),
+  })
+# ---
+# name: TestEdgeCaseSnapshots.test_negative_depth_values
+  dict({
+    'dtype': 'float32',
+    'has_negatives': True,
+    'max': 4.999918,
+    'mean': 1.47958,
+    'median': 1.465368,
+    'min': -1.999992,
+    'negative_fraction': 0.283958,
+    'p10': -1.326752,
+    'p25': -0.237353,
+    'p75': 3.219134,
+    'p90': 4.271452,
+    'shape': list([
+      120,
+      160,
+    ]),
+    'std': 2.011411,
+  })
+# ---
+# name: TestEdgeCaseSnapshots.test_single_element_array
+  dict({
+    'dtype': 'float64',
+    'max': 3.14159,
+    'mean': 3.14159,
+    'median': 3.14159,
+    'min': 3.14159,
+    'p10': 3.14159,
+    'p25': 3.14159,
+    'p75': 3.14159,
+    'p90': 3.14159,
+    'shape': list([
+      1,
+    ]),
+    'std': 0.0,
+  })
+# ---
+# name: TestEdgeCaseSnapshots.test_very_large_values
+  dict({
+    'dtype': 'float64',
+    'max': 9198488077.217651,
+    'mean': 5072812876.08846,
+    'median': 5168298700.319889,
+    'min': 1371613898.513057,
+    'p10': 2412885010.476261,
+    'p25': 2937533006.840711,
+    'p75': 6685587798.097456,
+    'p90': 7778656645.832383,
+    'shape': list([
+      10,
+      3,
+    ]),
+    'std': 2210875762.708013,
+  })
+# ---
+# name: TestFLAMEParamSnapshots.test_flame_param_shapes
+  dict({
+    'expression_params': dict({
+      'dtype': 'float32',
+      'max': 0.02152,
+      'mean': -0.000122,
+      'median': 0.002308,
+      'min': -0.029668,
+      'p10': -0.012512,
+      'p25': -0.009387,
+      'p75': 0.007371,
+      'p90': 0.011594,
+      'shape': list([
+        1,
+        50,
+      ]),
+      'std': 0.010836,
+    }),
+    'faces_shape': list([
+      9976,
+      3,
+    ]),
+    'global_rotation': dict({
+      'dtype': 'float32',
+      'max': 0.009483,
+      'mean': 0.004785,
+      'median': 0.005457,
+      'min': -0.000586,
+      'p10': 0.000623,
+      'p25': 0.002436,
+      'p75': 0.00747,
+      'p90': 0.008678,
+      'shape': list([
+        1,
+        3,
+      ]),
+      'std': 0.004138,
+    }),
+    'jaw_pose': dict({
+      'dtype': 'float32',
+      'max': -0.009393,
+      'mean': -0.013995,
+      'median': -0.014677,
+      'min': -0.017914,
+      'p10': -0.017267,
+      'p25': -0.016295,
+      'p75': -0.012035,
+      'p90': -0.01045,
+      'shape': list([
+        1,
+        3,
+      ]),
+      'std': 0.003512,
+    }),
+    'neck_pose': dict({
+      'dtype': 'float32',
+      'max': 0.006422,
+      'mean': 0.000312,
+      'median': 0.002142,
+      'min': -0.007627,
+      'p10': -0.005673,
+      'p25': -0.002742,
+      'p75': 0.004282,
+      'p90': 0.005566,
+      'shape': list([
+        1,
+        3,
+      ]),
+      'std': 0.00588,
+    }),
+    'shape_params': dict({
+      'dtype': 'float32',
+      'max': 0.028611,
+      'mean': -0.000236,
+      'median': 0.000928,
+      'min': -0.028304,
+      'p10': -0.013209,
+      'p25': -0.007832,
+      'p75': 0.006963,
+      'p90': 0.012292,
+      'shape': list([
+        1,
+        100,
+      ]),
+      'std': 0.010715,
+    }),
+    'translation': dict({
+      'dtype': 'float32',
+      'max': -0.001509,
+      'mean': -0.007067,
+      'median': -0.00511,
+      'min': -0.014581,
+      'p10': -0.012687,
+      'p25': -0.009845,
+      'p75': -0.00331,
+      'p90': -0.002229,
+      'shape': list([
+        1,
+        3,
+      ]),
+      'std': 0.005513,
+    }),
+    'vertices_shape': list([
+      1,
+      5023,
+      3,
+    ]),
+  })
+# ---
+# name: TestFrameSnapshots.test_frame_metadata
+  dict({
+    'frames': list([
+      dict({
+        'channels': 3,
+        'dtype': 'uint8',
+        'height': 480,
+        'mean_intensity': 133.7902,
+        'name': 'frame_000000.png',
+        'width': 640,
+      }),
+      dict({
+        'channels': 3,
+        'dtype': 'uint8',
+        'height': 480,
+        'mean_intensity': 134.692992,
+        'name': 'frame_000001.png',
+        'width': 640,
+      }),
+      dict({
+        'channels': 3,
+        'dtype': 'uint8',
+        'height': 480,
+        'mean_intensity': 135.572949,
+        'name': 'frame_000002.png',
+        'width': 640,
+      }),
+      dict({
+        'channels': 3,
+        'dtype': 'uint8',
+        'height': 480,
+        'mean_intensity': 136.510945,
+        'name': 'frame_000003.png',
+        'width': 640,
+      }),
+      dict({
+        'channels': 3,
+        'dtype': 'uint8',
+        'height': 480,
+        'mean_intensity': 137.430896,
+        'name': 'frame_000004.png',
+        'width': 640,
+      }),
+    ]),
+    'num_frames': 5,
+  })
+# ---
+# name: TestGaussianSnapshots.test_gaussian_stats
+  dict({
+    'colors_sh': dict({
+      'dtype': 'float32',
+      'max': 0.799745,
+      'mean': 0.034254,
+      'median': 0.0,
+      'min': 0.0,
+      'p10': 0.0,
+      'p25': 0.0,
+      'p75': 0.0,
+      'p90': 0.0,
+      'shape': list([
+        50,
+        16,
+        3,
+      ]),
+      'std': 0.13767,
+    }),
+    'num_gaussians': 50,
+    'opacities': dict({
+      'dtype': 'float32',
+      'max': 1.98415,
+      'mean': 0.880777,
+      'median': 0.816395,
+      'min': 0.045964,
+      'p10': 0.240819,
+      'p25': 0.442394,
+      'p75': 1.349042,
+      'p90': 1.566171,
+      'shape': list([
+        50,
+        1,
+      ]),
+      'std': 0.518302,
+    }),
+    'positions': dict({
+      'dtype': 'float32',
+      'max': 0.366445,
+      'mean': -0.006992,
+      'median': -0.005829,
+      'min': -0.265177,
+      'p10': -0.145281,
+      'p25': -0.066102,
+      'p75': 0.046843,
+      'p90': 0.117669,
+      'shape': list([
+        50,
+        3,
+      ]),
+      'std': 0.099828,
+    }),
+    'rotation_norms': dict({
+      'max': 1.0,
+      'min': 1.0,
+    }),
+    'rotations': dict({
+      'dtype': 'float32',
+      'max': 0.94347,
+      'mean': 0.05058,
+      'median': 0.073638,
+      'min': -0.986483,
+      'p10': -0.597408,
+      'p25': -0.365013,
+      'p75': 0.483817,
+      'p90': 0.758478,
+      'shape': list([
+        50,
+        4,
+      ]),
+      'std': 0.497435,
+    }),
+    'scales': dict({
+      'dtype': 'float32',
+      'max': -2.031111,
+      'mean': -3.54396,
+      'median': -3.666277,
+      'min': -4.966077,
+      'p10': -4.707323,
+      'p25': -4.310605,
+      'p75': -2.679732,
+      'p90': -2.348554,
+      'shape': list([
+        50,
+        3,
+      ]),
+      'std': 0.885649,
+    }),
+  })
+# ---
+# name: TestLandmarkSnapshots.test_landmark_output_structure
+  dict({
+    'confidence': 0.974568,
+    'landmarks_2d': dict({
+      'dtype': 'float32',
+      'max': 589.677673,
+      'mean': 323.762083,
+      'median': 324.668594,
+      'min': 50.400627,
+      'p10': 109.598644,
+      'p25': 185.109779,
+      'p75': 458.017021,
+      'p90': 541.22525,
+      'shape': list([
+        478,
+        2,
+      ]),
+      'std': 157.111056,
+    }),
+    'landmarks_3d': dict({
+      'dtype': 'float32',
+      'max': 589.677673,
+      'mean': 216.011158,
+      'median': 184.767319,
+      'min': -49.701668,
+      'p10': -19.077027,
+      'p25': 26.365358,
+      'p75': 393.156746,
+      'p90': 512.179959,
+      'shape': list([
+        478,
+        3,
+      ]),
+      'std': 199.913898,
+    }),
+    'num_landmarks': 478,
+    'quality_score': 0.669167,
+  })
+# ---
+# name: TestPipelineConfigSnapshots.test_key_hyperparameters
+  dict({
+    'capture.filtering.blur_threshold': 30.0,
+    'capture.filtering.quick_mode': True,
+    'capture.max_frames': 80,
+    'photos.multi_lens.main_200mp_weight': 5.0,
+    'reconstruction.da3.conf_threshold': 0.0,
+    'reconstruction.da3.process_res': 0,
+    'reconstruction.flame.num_expression_coeffs': 50,
+    'reconstruction.flame.num_shape_coeffs': 100,
+    'reconstruction.use_da3_unified': True,
+    'splatting.training.iterations': 3000,
+    'splatting.training.max_num_gaussians': 300000,
+  })
+# ---
+# name: TestSegmentationMaskSnapshots.test_synthetic_mask_stats
+  dict({
+    'dtype': 'uint8',
+    'fg_pixels': 60719,
+    'fg_ratio': 0.197653,
+    'shape': list([
+      480,
+      640,
+    ]),
+    'total_pixels': 307200,
+    'value_range': list([
+      0,
+      255,
+    ]),
+  })
+# ---
+# name: TestSensorSnapshots.test_imu_data_stats
+  dict({
+    'accel_xyz': dict({
+      'dtype': 'float64',
+      'max': 0.12793,
+      'mean': -3.267847,
+      'median': -0.038315,
+      'min': -9.952782,
+      'p10': -9.831016,
+      'p25': -9.767846,
+      'p75': 0.022366,
+      'p90': 0.056696,
+      'shape': list([
+        100,
+        3,
+      ]),
+      'std': 4.623663,
+    }),
+    'gyro_xyz': dict({
+      'dtype': 'float64',
+      'max': 0.523819,
+      'mean': 0.166009,
+      'median': 0.004857,
+      'min': -0.030407,
+      'p10': -0.01035,
+      'p25': -0.004044,
+      'p75': 0.492851,
+      'p90': 0.505697,
+      'shape': list([
+        100,
+        3,
+      ]),
+      'std': 0.236581,
+    }),
+    'timestamps': dict({
+      'dtype': 'float64',
+      'max': 1.0,
+      'mean': 0.5,
+      'median': 0.5,
+      'min': 0.0,
+      'p10': 0.1,
+      'p25': 0.25,
+      'p75': 0.75,
+      'p90': 0.9,
+      'shape': list([
+        100,
+      ]),
+      'std': 0.291576,
+    }),
+  })
+# ---

@@ -147,7 +147,7 @@ export default function KeyboardShortcuts({
         <div className="px-6 py-4 space-y-5 overflow-y-auto scrollbar-hide max-h-[50vh]">
           {Object.entries(categories).map(([category, shortcuts]) => (
             <div key={category}>
-              <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-2">
+              <div className="text-[11px] font-bold text-zinc-500 uppercase tracking-wider mb-2">
                 {category}
               </div>
               <div className="space-y-1">
@@ -157,7 +157,7 @@ export default function KeyboardShortcuts({
                     className="flex items-center justify-between py-1.5 px-2 rounded-lg hover:bg-white/[0.02] transition-colors"
                   >
                     <span className="text-zinc-300 text-sm">{s.label}</span>
-                    <kbd className="px-2 py-0.5 bg-zinc-800/80 border border-zinc-700/50 rounded text-[11px] text-zinc-400 font-mono tracking-tight">
+                    <kbd className="px-2 py-0.5 bg-zinc-800/80 border border-zinc-700/50 rounded text-xs text-zinc-400 font-mono tracking-tight">
                       {s.keys}
                     </kbd>
                   </div>

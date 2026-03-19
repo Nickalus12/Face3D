@@ -275,7 +275,7 @@ const NewScanWizard: React.FC<NewScanWizardProps> = ({ isOpen, onClose }) => {
                       <p className="text-sm font-medium text-zinc-200">
                         {detectedFiles.videos}
                       </p>
-                      <p className="text-[10px] text-zinc-500">Videos</p>
+                      <p className="text-[11px] text-zinc-500">Videos</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2.5 p-3 rounded-lg bg-zinc-900/50 border border-zinc-800/60">
@@ -287,7 +287,7 @@ const NewScanWizard: React.FC<NewScanWizardProps> = ({ isOpen, onClose }) => {
                       <p className="text-sm font-medium text-zinc-200">
                         {detectedFiles.photos}
                       </p>
-                      <p className="text-[10px] text-zinc-500">Photos</p>
+                      <p className="text-[11px] text-zinc-500">Photos</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2.5 p-3 rounded-lg bg-zinc-900/50 border border-zinc-800/60">
@@ -299,7 +299,7 @@ const NewScanWizard: React.FC<NewScanWizardProps> = ({ isOpen, onClose }) => {
                       <p className="text-sm font-medium text-zinc-200">
                         {detectedFiles.sensorLogs}
                       </p>
-                      <p className="text-[10px] text-zinc-500">Sensor Logs</p>
+                      <p className="text-[11px] text-zinc-500">Sensor Logs</p>
                     </div>
                   </div>
                 </div>
@@ -361,10 +361,10 @@ const NewScanWizard: React.FC<NewScanWizardProps> = ({ isOpen, onClose }) => {
                         >
                           {meta.label}
                         </p>
-                        <p className="text-[10px] text-zinc-500 mt-0.5">
+                        <p className="text-[11px] text-zinc-500 mt-0.5">
                           {meta.description}
                         </p>
-                        <p className="text-[10px] text-zinc-600 mt-1">
+                        <p className="text-[11px] text-zinc-600 mt-1">
                           {meta.time}
                         </p>
                       </button>
@@ -501,7 +501,7 @@ const NewScanWizard: React.FC<NewScanWizardProps> = ({ isOpen, onClose }) => {
                   <span className="text-sm font-medium text-zinc-200">
                     {PRESET_META[preset].time}
                   </span>
-                  <span className="text-[10px] text-zinc-500">Est. Time</span>
+                  <span className="text-[11px] text-zinc-500">Est. Time</span>
                 </div>
                 <div className="p-3 rounded-lg bg-zinc-900/30 border border-zinc-800/40 flex flex-col items-center gap-1.5">
                   <Cpu size={16} className="text-indigo-400" />
@@ -512,7 +512,7 @@ const NewScanWizard: React.FC<NewScanWizardProps> = ({ isOpen, onClose }) => {
                       ? "8+ GB"
                       : "4+ GB"}
                   </span>
-                  <span className="text-[10px] text-zinc-500">VRAM Req.</span>
+                  <span className="text-[11px] text-zinc-500">VRAM Req.</span>
                 </div>
                 <div className="p-3 rounded-lg bg-zinc-900/30 border border-zinc-800/40 flex flex-col items-center gap-1.5">
                   <HardDrive size={16} className="text-emerald-400" />
@@ -523,7 +523,7 @@ const NewScanWizard: React.FC<NewScanWizardProps> = ({ isOpen, onClose }) => {
                       ? "~800 MB"
                       : "~300 MB"}
                   </span>
-                  <span className="text-[10px] text-zinc-500">Output Size</span>
+                  <span className="text-[11px] text-zinc-500">Output Size</span>
                 </div>
               </div>
 

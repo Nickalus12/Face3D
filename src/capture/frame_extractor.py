@@ -23,6 +23,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from utils.timing import timed
+
 logger = logging.getLogger(__name__)
 
 # Samsung S25 Ultra lens focal lengths (35mm equiv) mapped to sensor crop info
@@ -474,6 +476,7 @@ def extract_frames(
     return frame_paths
 
 
+@timed
 def extract_frames_motion_based(
     video_path: str | Path,
     output_dir: str | Path,

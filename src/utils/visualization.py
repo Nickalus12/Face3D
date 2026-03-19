@@ -292,7 +292,7 @@ def create_turntable_gif(
         w, h = img.size
         scale = max_size / max(w, h)
         if scale < 1.0:
-            img = img.resize((int(w * scale), int(h * scale)), PILImage.LANCZOS)
+            img = img.resize((int(w * scale), int(h * scale)), PILImage.Resampling.LANCZOS)
         pil_frames.append(img)
 
     if not pil_frames:

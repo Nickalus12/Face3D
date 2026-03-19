@@ -6,20 +6,36 @@ Gaussians) and a density-field marching cubes alternative.
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
-import open3d as o3d
 import torch
 from tqdm import tqdm
 
 from splatting.camera_utils import Camera, generate_turntable_cameras
-from splatting.initializer import GaussianModel, SH_COEFFS, _save_gaussians_ply
+from splatting.compressor import GaussianCompressor
+from splatting.initializer import GaussianModel, _save_gaussians_ply
+from utils.timing import timed
+
+if TYPE_CHECKING:
+    import open3d as o3d
+
+# open3d is heavy (~2s import) — lazy-loaded only when mesh extraction is needed
+_o3d = None
+
+
+def _get_o3d():
+    """Lazy-load open3d on first use to avoid slowing pipeline startup."""
+    global _o3d
+    if _o3d is None:
+        import open3d as o3d
+        _o3d = o3d
+    return _o3d
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +43,20 @@ logger = logging.getLogger(__name__)
 _SH_C0 = 0.28209479177387814
 
 
+def _detect_sh_degree(model: GaussianModel) -> int:
+    """Detect SH degree from model's colors_sh shape. SH1=4 coeffs, SH3=16."""
+    n_coeffs = model.colors_sh.shape[1]
+    import math
+    degree = int(math.isqrt(n_coeffs)) - 1
+    return max(0, min(degree, 3))
+
+
 # ---------------------------------------------------------------------------
 # Original exports (kept for backward compatibility)
 # ---------------------------------------------------------------------------
 
 
+@timed
 def export_gaussians_ply(gaussians: GaussianModel, output_path: Path) -> None:
     """Save trained Gaussians as a standard 3DGS .ply file.
 
@@ -73,6 +98,7 @@ def export_mesh_from_gaussians(
         image_size: Resolution of each rendered view.
     """
     from gsplat import rasterization
+    o3d = _get_o3d()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     gaussians = gaussians.to(device)
@@ -112,7 +138,7 @@ def export_mesh_from_gaussians(
     scales = torch.exp(gaussians.scales)
     opacities = torch.sigmoid(gaussians.opacities.squeeze(-1))
     quats = gaussians.rotations / gaussians.rotations.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-    bg = torch.zeros(3, device=device)
+    torch.zeros(3, device=device)
 
     # Camera intrinsics for Open3D
     fx = image_size / (2.0 * math.tan(fov / 2.0))
@@ -131,7 +157,7 @@ def export_mesh_from_gaussians(
 
     logger.info("Rendering %d views for TSDF integration...", len(cameras))
 
-    for cam in tqdm(cameras, desc="TSDF integration"):
+    for view_idx, cam in enumerate(tqdm(cameras, desc="TSDF integration")):
         viewmat = cam.get_viewmat(device)
         K = cam.get_K(device)
 
@@ -177,7 +203,10 @@ def export_mesh_from_gaussians(
         extrinsic = viewmat.cpu().numpy().astype(np.float64)
         volume.integrate(rgbd, intrinsic, np.linalg.inv(extrinsic))
 
-        torch.cuda.empty_cache()
+        # Clear CUDA cache periodically (every 20 views) instead of every view
+        # to avoid the overhead of frequent cache flushes (~5ms each)
+        if (view_idx + 1) % 20 == 0:
+            torch.cuda.empty_cache()
 
     # Extract mesh
     logger.info("Extracting triangle mesh from TSDF volume...")
@@ -228,7 +257,6 @@ def compute_gaussian_normals(gaussians: GaussianModel) -> torch.Tensor:
     Returns:
         (N, 3) unit normals on CPU.
     """
-    device = gaussians.device
     scales = torch.exp(gaussians.scales)  # (N, 3)
     quats = gaussians.rotations          # (N, 4)
 
@@ -292,7 +320,7 @@ def extract_mesh_sugar(
     Returns:
         The extracted Open3D TriangleMesh.
     """
-    device = gaussians.device
+    o3d = _get_o3d()
     n = gaussians.num_gaussians
     logger.info("SuGaR mesh extraction: %d total Gaussians", n)
 
@@ -470,6 +498,7 @@ def extract_mesh_density_field(
     Returns:
         The extracted Open3D TriangleMesh.
     """
+    o3d = _get_o3d()
     from skimage.measure import marching_cubes
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -498,7 +527,7 @@ def extract_mesh_density_field(
 
     # Build rotation matrices and inverse covariance matrices on GPU
     R = _quat_to_rotmat(quats)                     # (N, 3, 3)
-    S = torch.diag_embed(scales)                   # (N, 3, 3)
+    torch.diag_embed(scales)                   # (N, 3, 3)
     # Covariance: Sigma = R @ S^2 @ R^T
     # Inverse covariance: Sigma^{-1} = R @ S^{-2} @ R^T
     S_inv_sq = torch.diag_embed(1.0 / (scales ** 2).clamp(min=1e-12))  # (N, 3, 3)
@@ -643,6 +672,7 @@ def export_for_animation(
             May be ``None`` if no FLAME fitting was performed.
         output_path: Base path for output files.
     """
+    o3d = _get_o3d()
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -695,7 +725,399 @@ def export_for_animation(
 
 
 # ---------------------------------------------------------------------------
-# gsplat compression export
+# gsplat native export (PLY / SPLAT / compressed PLY via export_splats)
+# ---------------------------------------------------------------------------
+
+
+def _prepare_splats_dict(gaussians: GaussianModel) -> dict[str, torch.Tensor]:
+    """Build the splats dictionary expected by gsplat's export and compression APIs.
+
+    Activates log-space scales (exp), logit-space opacities (sigmoid), and
+    normalizes quaternions.  SH coefficients are split into DC (sh0) and
+    higher-order (shN) components.
+
+    Args:
+        gaussians: Trained GaussianModel.
+
+    Returns:
+        Dictionary with keys: means, scales, quats, opacities, sh0, shN.
+    """
+    scales = torch.exp(gaussians.scales.detach())
+    quats = gaussians.rotations.detach()
+    quats = quats / quats.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+    opacities = torch.sigmoid(gaussians.opacities.squeeze(-1).detach())
+    sh_all = gaussians.colors_sh.detach()  # (N, K, 3)
+
+    return {
+        "means": gaussians.positions.detach(),
+        "scales": scales,
+        "quats": quats,
+        "opacities": opacities,
+        "sh0": sh_all[:, :1, :],           # (N, 1, 3)
+        "shN": sh_all[:, 1:, :],           # (N, K-1, 3)
+    }
+
+
+@timed
+def export_gsplat_native(
+    gaussians: GaussianModel,
+    output_path: Path,
+    formats: list[str] | None = None,
+) -> dict[str, Path]:
+    """Export Gaussians using gsplat's native ``export_splats`` API.
+
+    Supports three output formats:
+        - ``"ply"``: Standard PLY (most compatible, works with SuperSplat,
+          playcanvas, polycam, etc.).
+        - ``"splat"``: Compact binary format for the antimatter15 web viewer.
+        - ``"compressed"``: Compressed PLY with quantised SH and positions
+          (smaller file, for SuperSplat viewer).
+
+    Falls back to the custom PLY writer if ``gsplat.export_splats`` is not
+    available (gsplat < 1.4).
+
+    Args:
+        gaussians: Trained GaussianModel (CPU or GPU).
+        output_path: Base path for output files.  The format-specific suffix
+            is appended automatically (e.g. ``output_path.with_suffix('.splat')``).
+        formats: List of format strings to export.  Defaults to ``["ply"]``.
+
+    Returns:
+        Dictionary mapping format name to the Path that was written.
+    """
+    if formats is None:
+        formats = ["ply"]
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    splats = _prepare_splats_dict(gaussians)
+    exported: dict[str, Path] = {}
+
+    # Map our config names to gsplat format strings and file extensions
+    _FORMAT_MAP = {
+        "ply": ("ply", ".ply"),
+        "splat": ("splat", ".splat"),
+        "compressed": ("ply_compressed", "_compressed.ply"),
+    }
+
+    for fmt in formats:
+        if fmt not in _FORMAT_MAP:
+            logger.warning("Unknown export format %r; skipping", fmt)
+            continue
+
+        gsplat_fmt, suffix = _FORMAT_MAP[fmt]
+        dest = output_path.with_suffix(suffix) if not suffix.startswith("_") else Path(
+            str(output_path.with_suffix("")) + suffix
+        )
+
+        # Try gsplat native API first
+        try:
+            from gsplat import export_splats
+
+            with torch.no_grad():
+                export_splats(
+                    means=splats["means"],
+                    scales=splats["scales"],
+                    quats=splats["quats"],
+                    opacities=splats["opacities"],
+                    sh0=splats["sh0"],
+                    shN=splats["shN"],
+                    format=gsplat_fmt,
+                    save_to=str(dest),
+                )
+            logger.info(
+                "Exported %d Gaussians as %s to %s (via gsplat.export_splats)",
+                gaussians.num_gaussians, fmt, dest,
+            )
+            exported[fmt] = dest
+            continue
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning("gsplat.export_splats(%s) failed: %s", fmt, e)
+
+        # Fallback: custom PLY writer (only for "ply" format)
+        if fmt == "ply":
+            _save_gaussians_ply(gaussians, dest)
+            logger.info(
+                "Exported %d Gaussians as PLY to %s (custom writer fallback)",
+                gaussians.num_gaussians, dest,
+            )
+            exported[fmt] = dest
+        else:
+            logger.warning(
+                "Cannot export %r format without gsplat.export_splats; skipping", fmt,
+            )
+
+    return exported
+
+
+# ---------------------------------------------------------------------------
+# Compression step (runs after export)
+# ---------------------------------------------------------------------------
+
+
+@timed
+def compress_exported_files(
+    exported: dict[str, Path],
+    gaussians: GaussianModel | None = None,
+    compression_config: dict | None = None,
+) -> dict[str, dict]:
+    """Optionally compress exported Gaussian files using Draco or quantization.
+
+    This should be called after ``export_gsplat_native`` or ``export_gaussians_ply``
+    to create compressed versions of the output files.
+
+    Args:
+        exported: Dict mapping format name to Path (from ``export_gsplat_native``).
+        gaussians: Optional GaussianModel for raw-parameter compression.
+        compression_config: Configuration dict with keys:
+            - ``enabled`` (bool): Whether to compress (default True).
+            - ``backend`` (str): "draco", "quantized", or "auto" (default "auto").
+            - ``quality`` (str): "fast", "balanced", or "quality" (default "balanced").
+            - ``keep_uncompressed`` (bool): Keep originals alongside compressed (default True).
+
+    Returns:
+        Dict mapping format name to compression stats dict.
+    """
+    if compression_config is None:
+        compression_config = {}
+
+    if not compression_config.get("enabled", True):
+        logger.info("Compression disabled in config; skipping")
+        return {}
+
+    quality = compression_config.get("quality", "balanced")
+    keep_uncompressed = compression_config.get("keep_uncompressed", True)
+
+    try:
+        compressor = GaussianCompressor(quality=quality)
+    except Exception as e:
+        logger.warning("Failed to initialize compressor: %s", e)
+        return {}
+
+    results: dict[str, dict] = {}
+
+    for fmt, path in exported.items():
+        if not path.exists():
+            continue
+
+        # Only compress PLY and splat files
+        if path.suffix.lower() not in (".ply", ".splat"):
+            continue
+
+        compressed_path = path.with_name(
+            path.stem + "_compressed" + path.suffix
+        )
+
+        try:
+            stats = compressor.compress_ply(path, compressed_path)
+            results[fmt] = stats
+            results[fmt]["compressed_path"] = str(compressed_path)
+
+            # Remove uncompressed if configured
+            if not keep_uncompressed and compressed_path.exists():
+                path.unlink()
+                logger.info("Removed uncompressed file: %s", path)
+
+        except Exception as e:
+            logger.warning("Compression failed for %s: %s", path, e)
+
+    # Also try raw Gaussian parameter compression if model is available
+    if gaussians is not None and "ply" in exported:
+        ply_path = exported["ply"]
+        raw_compressed = ply_path.with_name(ply_path.stem + "_draco.gs3")
+
+        try:
+            splats = _prepare_splats_dict(gaussians)
+            raw_stats = compressor.compress_gaussians(
+                means=splats["means"].cpu().numpy(),
+                scales=splats["scales"].cpu().numpy(),
+                rotations=splats["quats"].cpu().numpy(),
+                opacities=splats["opacities"].cpu().numpy(),
+                sh_coeffs=gaussians.colors_sh.detach().cpu().numpy(),
+                output_path=raw_compressed,
+            )
+            results["raw_compressed"] = raw_stats
+            results["raw_compressed"]["compressed_path"] = str(raw_compressed)
+        except Exception as e:
+            logger.warning("Raw Gaussian compression failed: %s", e)
+
+    if results:
+        logger.info("Compression summary:")
+        for fmt, stats in results.items():
+            logger.info(
+                "  %s: %.1f MB -> %.1f MB (%.1fx, %s)",
+                fmt,
+                stats.get("original_size", 0) / 1e6,
+                stats.get("compressed_size", 0) / 1e6,
+                stats.get("ratio", 1.0),
+                stats.get("backend_used", "unknown"),
+            )
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# glTF 2.0 export
+# ---------------------------------------------------------------------------
+
+
+def export_to_gltf(
+    mesh_path: Path | None,
+    gaussians: GaussianModel | None = None,
+    output_path: Path | str = "model.glb",
+    texture_path: Path | None = None,
+) -> Path | None:
+    """Export the reconstructed mesh (and optionally texture) as glTF 2.0 / GLB.
+
+    The Khronos Group ratified a glTF extension for Gaussian Splats
+    (KHR_gaussian_splatting) but tooling is still maturing.  This function
+    exports the *triangle mesh* produced by SuGaR / TSDF extraction as a
+    standard glTF 2.0 binary (.glb) with an optional base-color texture,
+    which is universally supported by 3D viewers and game engines.
+
+    Requires ``trimesh`` (lightweight) or ``pygltflib``.  If neither is
+    installed, logs a warning and returns None.
+
+    Args:
+        mesh_path: Path to the extracted mesh (.ply or .obj).  Required.
+        gaussians: Trained GaussianModel (reserved for future KHR_gaussian_splatting
+            export; currently unused).
+        output_path: Destination .glb or .gltf file.
+        texture_path: Optional diffuse texture image to embed in the glTF.
+
+    Returns:
+        Path to the written glTF file, or None if export was not possible.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if mesh_path is None or not Path(mesh_path).exists():
+        logger.warning("No mesh file provided for glTF export; skipping")
+        return None
+
+    # --- Try trimesh (preferred: lightweight, handles PLY/OBJ/glTF) ---
+    try:
+        import trimesh
+
+        mesh = trimesh.load(str(mesh_path), process=False)
+
+        # Attach texture if available
+        if texture_path and Path(texture_path).exists():
+            from PIL import Image
+
+            tex_image = Image.open(str(texture_path))
+            material = trimesh.visual.material.PBRMaterial(
+                baseColorTexture=tex_image,
+                metallicFactor=0.0,
+                roughnessFactor=0.8,
+            )
+            # If the mesh has UV coordinates, apply the textured material
+            if hasattr(mesh.visual, "uv") and mesh.visual.uv is not None:
+                mesh.visual = trimesh.visual.TextureVisuals(
+                    uv=mesh.visual.uv,
+                    material=material,
+                )
+            else:
+                logger.info("Mesh has no UV coordinates; texture will be vertex-colored only")
+
+        # Export as GLB (binary glTF)
+        glb_path = output_path.with_suffix(".glb")
+        mesh.export(str(glb_path), file_type="glb")
+        logger.info(
+            "Exported mesh to glTF (GLB) at %s (%d vertices, %d faces)",
+            glb_path,
+            len(mesh.vertices) if hasattr(mesh, "vertices") else 0,
+            len(mesh.faces) if hasattr(mesh, "faces") else 0,
+        )
+        return glb_path
+
+    except ImportError:
+        logger.info("trimesh not installed; trying pygltflib for glTF export")
+    except Exception as e:
+        logger.warning("trimesh glTF export failed: %s", e)
+
+    # --- Fallback: pygltflib ---
+    try:
+        import pygltflib
+
+        o3d = _get_o3d()
+        mesh = o3d.io.read_triangle_mesh(str(mesh_path))
+
+        vertices = np.asarray(mesh.vertices).astype(np.float32)
+        triangles = np.asarray(mesh.triangles).astype(np.uint32)
+        len(mesh.vertex_colors) > 0
+
+        # Pack vertex data: position (3 floats) + optional color (3 floats)
+        vert_data = vertices.tobytes()
+        tri_data = triangles.tobytes()
+
+        gltf = pygltflib.GLTF2(
+            scene=0,
+            scenes=[pygltflib.Scene(nodes=[0])],
+            nodes=[pygltflib.Node(mesh=0)],
+            meshes=[pygltflib.Mesh(primitives=[
+                pygltflib.Primitive(
+                    attributes=pygltflib.Attributes(POSITION=0),
+                    indices=1,
+                ),
+            ])],
+            accessors=[
+                pygltflib.Accessor(
+                    bufferView=0,
+                    componentType=pygltflib.FLOAT,
+                    count=len(vertices),
+                    type=pygltflib.VEC3,
+                    max=vertices.max(axis=0).tolist(),
+                    min=vertices.min(axis=0).tolist(),
+                ),
+                pygltflib.Accessor(
+                    bufferView=1,
+                    componentType=pygltflib.UNSIGNED_INT,
+                    count=triangles.size,
+                    type=pygltflib.SCALAR,
+                    max=[int(triangles.max())],
+                    min=[int(triangles.min())],
+                ),
+            ],
+            bufferViews=[
+                pygltflib.BufferView(
+                    buffer=0,
+                    byteOffset=0,
+                    byteLength=len(vert_data),
+                    target=pygltflib.ARRAY_BUFFER,
+                ),
+                pygltflib.BufferView(
+                    buffer=0,
+                    byteOffset=len(vert_data),
+                    byteLength=len(tri_data),
+                    target=pygltflib.ELEMENT_ARRAY_BUFFER,
+                ),
+            ],
+            buffers=[pygltflib.Buffer(byteLength=len(vert_data) + len(tri_data))],
+        )
+        gltf.set_binary_blob(vert_data + tri_data)
+
+        glb_path = output_path.with_suffix(".glb")
+        gltf.save(str(glb_path))
+        logger.info("Exported mesh to glTF (GLB) via pygltflib at %s", glb_path)
+        return glb_path
+
+    except ImportError:
+        logger.warning(
+            "glTF export requires 'trimesh' or 'pygltflib'. "
+            "Install with: pip install trimesh  OR  pip install pygltflib"
+        )
+    except Exception as e:
+        logger.warning("pygltflib glTF export failed: %s", e)
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# gsplat compression export (PngCompression)
 # ---------------------------------------------------------------------------
 
 
@@ -720,21 +1142,7 @@ def export_compressed(
     output_path = Path(output_path)
 
     # Prepare the splats dict that gsplat compression expects
-    device = gaussians.device
-    scales = torch.exp(gaussians.scales.detach())
-    quats = gaussians.rotations.detach()
-    quats = quats / quats.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-    opacities = torch.sigmoid(gaussians.opacities.squeeze(-1).detach())
-    sh_all = gaussians.colors_sh.detach()  # (N, 16, 3)
-
-    splats = {
-        "means": gaussians.positions.detach(),
-        "scales": scales,
-        "quats": quats,
-        "opacities": opacities,
-        "sh0": sh_all[:, :1, :],          # (N, 1, 3)
-        "shN": sh_all[:, 1:, :],          # (N, 15, 3)
-    }
+    splats = _prepare_splats_dict(gaussians)
 
     # --- Try PngCompression first ---
     try:
@@ -951,7 +1359,7 @@ def render_novel_views(
                     Ks=K[None],
                     width=cam.width,
                     height=cam.height,
-                    sh_degree=3,
+                    sh_degree=_detect_sh_degree(gaussians),
                     packed=True,
                 )
                 renders = colors_out
@@ -966,7 +1374,7 @@ def render_novel_views(
                     Ks=K[None],
                     width=cam.width,
                     height=cam.height,
-                    sh_degree=3,
+                    sh_degree=_detect_sh_degree(gaussians),
                     packed=True,
                 )
 

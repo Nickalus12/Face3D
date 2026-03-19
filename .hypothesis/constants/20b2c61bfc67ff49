@@ -1,0 +1,4 @@
+# file: D:\Projects\3D\src\capture\photo_processor.py
+# hypothesis_version: 6.151.9
+
+[0.0, 0.0031308, 0.055, 1.0, 1.055, 1.95, 2.4, 6.3, 6.7, 12.92, 65535.0, 200, 300, 600, '--database_path', '--image_path', '--input_path', '--output_path', '.dng', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '0', '0_refined', '0_with_photos', '8192', 'ExposureTime', 'FocalLength', 'ISOSpeedRatings', 'Make', 'Model', 'Orientation', 'Processing photos', 'bit_depth', 'bundle_adjuster', 'cameras.bin', 'cameras.txt', 'database.db', 'detected_lens', 'exhaustive_matcher', 'exposure_time', 'feature_extractor', 'focal_length', 'focal_length_35mm', 'height', 'image_registrator', 'images.bin', 'images.txt', 'is_photo', 'is_raw', 'iso', 'make', 'model', 'numerator', 'orientation', 'output_file', 'output_name', 'photo_metadata.json', 'points3D.bin', 'points3D.txt', 'source_file', 'srgb', 'supertelephoto', 'telephoto', 'ultrawide', 'unknown', 'utf-8', 'wide', 'width']

@@ -3,7 +3,6 @@
 import csv
 import json
 import logging
-import re
 import subprocess
 from pathlib import Path
 from typing import Optional, Union

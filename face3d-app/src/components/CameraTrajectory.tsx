@@ -264,24 +264,24 @@ export default function CameraTrajectory() {
           </div>
           <div>
             <div className="text-xs font-medium text-zinc-200">Camera Trajectory</div>
-            <div className="text-[10px] text-zinc-500">3D orientation path from sensor data</div>
+            <div className="text-[11px] text-zinc-500">3D orientation path from sensor data</div>
           </div>
         </div>
 
         {trajectoryStats && (
           <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1.5 text-[11px]">
+            <div className="flex items-center gap-1.5 text-xs">
               <RotateCcw size={12} className="text-zinc-500" />
               <span className="text-zinc-300 font-mono">{trajectoryStats.totalRotation}</span>
               <span className="text-zinc-500">deg total</span>
             </div>
-            <div className="flex items-center gap-1.5 text-[11px]">
+            <div className="flex items-center gap-1.5 text-xs">
               <Target size={12} className="text-zinc-500" />
               <span className="text-zinc-300 font-mono">{trajectoryStats.coverageAngle}</span>
               <span className="text-zinc-500">deg net</span>
             </div>
             <div
-              className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${
+              className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${
                 trajectoryStats.quality === 'Excellent'
                   ? 'bg-emerald-500/15 text-emerald-400'
                   : trajectoryStats.quality === 'Good'
@@ -318,7 +318,7 @@ export default function CameraTrajectory() {
       {/* Legend */}
       {hasData && (
         <div className="flex items-center justify-between px-4 py-2 border-t border-zinc-800/40">
-          <div className="flex items-center gap-4 text-[10px] text-zinc-500">
+          <div className="flex items-center gap-4 text-[11px] text-zinc-500">
             <div className="flex items-center gap-1.5">
               <div className="w-2 h-2 rounded-full bg-blue-500" />
               <span>Start</span>
@@ -332,7 +332,7 @@ export default function CameraTrajectory() {
               <span>End</span>
             </div>
           </div>
-          <div className="text-[10px] text-zinc-600">
+          <div className="text-[11px] text-zinc-600">
             {orientationData.length} samples | Drag to rotate
           </div>
         </div>

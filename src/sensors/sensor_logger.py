@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Optional, Sequence, Union
 
 import numpy as np
-from scipy.interpolate import interp1d
 from scipy.spatial.transform import Rotation
 
 logger = logging.getLogger(__name__)

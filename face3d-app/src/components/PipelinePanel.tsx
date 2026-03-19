@@ -224,7 +224,7 @@ export const PipelinePanel: React.FC = () => {
                   }`}
                 />
               </svg>
-              <div className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-zinc-200">
+              <div className="absolute inset-0 flex items-center justify-center text-[11px] font-bold text-zinc-200">
                 {percent}%
               </div>
             </div>
@@ -237,7 +237,7 @@ export const PipelinePanel: React.FC = () => {
             <span className="font-semibold uppercase tracking-wider">Recent Logs</span>
             <span>{isRunning && startedAt ? formatElapsed(elapsed) : '--:--'} elapsed</span>
           </div>
-          <div className="bg-[#050505] border border-zinc-800/80 rounded-lg p-3 font-mono text-[10px] text-zinc-400 space-y-1 h-20 overflow-hidden relative">
+          <div className="bg-[#050505] border border-zinc-800/80 rounded-lg p-3 font-mono text-[11px] text-zinc-400 space-y-1 h-20 overflow-hidden relative">
             {recentLogs.length === 0 ? (
               <p className="text-zinc-600 italic">Waiting for pipeline output...</p>
             ) : (

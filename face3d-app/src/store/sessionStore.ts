@@ -1,9 +1,10 @@
 import { create } from "zustand";
 import {
-  listSessions,
+  listSessions as fsListSessions,
   getSessionFiles,
   type Session,
 } from "../lib/api";
+import { listSessionsFromDb } from "../lib/dbBridge";
 
 export interface SessionFile {
   name: string;
@@ -19,6 +20,7 @@ interface SessionState {
 
   fetchSessions: () => Promise<void>;
   selectSession: (session: Session) => Promise<void>;
+  clearSession: () => void;
   createSession: (name: string, contentDir: string) => void;
   clearError: () => void;
 }
@@ -33,7 +35,8 @@ const useSessionStore = create<SessionState>((set, get) => ({
   fetchSessions: async () => {
     set({ isLoading: true, error: null });
     try {
-      const sessions = await listSessions();
+      // Use DB-backed listing (falls back to filesystem if DB not ready)
+      const sessions = await listSessionsFromDb();
       const current = get().currentSession;
       // Keep current selection if it still exists, otherwise auto-select first
       const stillExists = current
@@ -72,6 +75,10 @@ const useSessionStore = create<SessionState>((set, get) => ({
     } catch (e) {
       console.error("Failed to fetch session files:", e);
     }
+  },
+
+  clearSession: () => {
+    set({ currentSession: null, sessionFiles: [] });
   },
 
   createSession: (name: string, _contentDir: string) => {

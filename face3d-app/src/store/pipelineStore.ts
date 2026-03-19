@@ -5,6 +5,7 @@ import {
   getGpuInfo as apiGetGpuInfo,
   type GpuInfo,
 } from "../lib/api";
+import { onPipelineStart, onStageStart } from "../lib/dbBridge";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -29,13 +30,14 @@ export interface MetricPoint {
 }
 
 const PIPELINE_STAGES: { id: number; name: string }[] = [
+  { id: 0, name: "Data Organization" },
   { id: 1, name: "Frame Extraction" },
   { id: 2, name: "Color Correction" },
   { id: 3, name: "Quality Filtering" },
-  { id: 4, name: "IMU Parsing" },
-  { id: 5, name: "Rotation Priors" },
-  { id: 6, name: "COLMAP SfM" },
-  { id: 7, name: "Depth Estimation" },
+  { id: 4, name: "Sensor Parsing" },
+  { id: 5, name: "Orientation" },
+  { id: 6, name: "Depth Estimation" },
+  { id: 7, name: "Structure from Motion" },
   { id: 8, name: "Depth Alignment" },
   { id: 9, name: "Face Landmarks" },
   { id: 10, name: "FLAME Fitting" },
@@ -94,10 +96,10 @@ const usePipelineStore = create<PipelineState>((set, get) => ({
     // Immediately flip to "running" so the UI feels instant.
     set({
       status: "running",
-      currentStage: 1,
+      currentStage: 0,
       stages: PIPELINE_STAGES.map((s) => ({
         ...s,
-        status: s.id === 1 ? ("running" as const) : ("pending" as const),
+        status: s.id === 0 ? ("running" as const) : ("pending" as const),
       })),
       metrics: [],
       logs: [],
@@ -108,6 +110,9 @@ const usePipelineStore = create<PipelineState>((set, get) => ({
 
     get().addLog(`Starting pipeline for session: ${session}`, "info");
     get().addLog(`Content directory: ${contentDir}`, "info");
+
+    // Record pipeline start to DB
+    onPipelineStart(session, contentDir).catch(() => {});
 
     try {
       await apiStartPipeline(contentDir, session);
@@ -201,6 +206,7 @@ const usePipelineStore = create<PipelineState>((set, get) => ({
     );
     if (stageStartMatch) {
       const stageNum = parseInt(stageStartMatch[1], 10);
+      const stageName = PIPELINE_STAGES.find(s => s.id === stageNum)?.name ?? `Stage ${stageNum}`;
       set((s) => ({
         currentStage: stageNum,
         stages: s.stages.map((st) => {
@@ -211,6 +217,8 @@ const usePipelineStore = create<PipelineState>((set, get) => ({
           return st;
         }),
       }));
+      // Record stage start to DB
+      onStageStart(stageNum, stageName).catch(() => {});
       return;
     }
 

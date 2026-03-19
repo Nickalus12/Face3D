@@ -1,0 +1,4 @@
+# file: D:\Projects\3D\src\utils\timing.py
+# hypothesis_version: 6.151.9
+
+[0.0, 0.01, 0.1, 999, 1024, '+', '-', 'FAILED', 'No stages recorded.', 'allocated_gb', 'cpu_peak_mb', 'duration_s', 'error', 'gpu_peak_gb', 'max_allocated_gb', 'name', 'num_items', 'operation', 'peak_gb', 'reserved_gb', 'session_id', 'skipped', 'stage_num', 'stages', 'throughput_per_s', 'timestamp', 'total_stage_time_s', 'total_wall_time_s', 'utf-8', 'w']

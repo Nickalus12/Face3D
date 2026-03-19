@@ -1,0 +1,4 @@
+# file: D:\Projects\3D\src\capture\frame_filter.py
+# hypothesis_version: 6.151.9
+
+[-1.0, 0.0, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 100.0, 100, 225, 500, 640, '(', '*_conf.npz', '*_confidence.npz', '*_pose.npz', '.jpeg', '.jpg', '.png', '.tif', '.tiff', 'R', '_conf', '_confidence', '_pose', 'actual_count', 'all_posed', 'blur_threshold', 'bright_ratio', 'conf', 'confidence', 'confidence_weighted', 'dark_ratio', 'details', 'exposure', 'exposure_high', 'exposure_low', 'face_area_ratio', 'face_confidence', 'face_detection', 'face_too_small', 'file', 'frames', 'images.bin', 'laplacian_variance', 'map', 'mean_intensity', 'mediapipe_available', 'min_baseline', 'min_face_area_ratio', 'no_face_detected', 'no_frames', 'no_poses_available', 'path', 'pose', 'posed_frames', 'quick_mode', 'reason', 'reasons', 'rejected', 'rejection_reasons', 'require_face', 'selected', 'settings', 'solutions', 'strategy', 'summary', 't', 'target_count', 'total', 'total_frames', 'unreadable', 'utf-8']

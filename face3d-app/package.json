@@ -26,6 +26,7 @@
     "react-dom": "^19.1.0",
     "recharts": "^3.8.0",
     "tailwind-merge": "^3.5.0",
+    "tauri-plugin-libsql-api": "^0.1.0",
     "three": "^0.183.2",
     "zustand": "^5.0.12"
   },

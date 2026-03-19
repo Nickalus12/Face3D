@@ -17,12 +17,17 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from utils.numba_kernels import HAS_NUMBA
+from utils.timing import timed
+
 logger = logging.getLogger(__name__)
 
 # Precomputed 8-bit LUT for S-Log3 -> linear mapping (256 entries).
 # Each entry maps a uint8 value (0-255) to its linear-light float32 value.
 # Built once at import time to avoid per-frame recomputation.
 _SLOG3_LUT_8BIT: np.ndarray | None = None
+# Cached combined S-Log3 -> sRGB uint8 LUT (avoids rebuilding per frame)
+_SLOG3_TO_SRGB_LUT_U8: np.ndarray | None = None
 
 
 def _build_slog3_lut_8bit() -> np.ndarray:
@@ -56,17 +61,19 @@ def _slog3_to_linear(x: np.ndarray) -> np.ndarray:
     S-Log3 is defined piecewise. Values are expected in [0, 1] range.
     Reference: Sony S-Log3 white paper.
 
-    Fully vectorised — no per-pixel Python branching.
+    Uses Numba JIT when available for ~2-5x speedup on large images.
+    Falls back to vectorised numpy otherwise.
     """
     x = np.clip(x, 0.0, 1.0, out=x if x.flags.writeable else None).astype(np.float32)
 
-    # Cutpoint in S-Log3 encoded domain
-    cut = np.float32(171.2102946929 / 1023.0)  # ~0.16736
+    if HAS_NUMBA:
+        from utils.numba_kernels import slog3_to_linear
+        return slog3_to_linear(x)
 
-    # Vectorised piecewise: compute both branches, then select via np.where
+    # Numpy fallback — vectorised piecewise
+    cut = np.float32(171.2102946929 / 1023.0)  # ~0.16736
     x_scaled = x * np.float32(1023.0)
     linear_val = (x_scaled - np.float32(95.0)) / np.float32(171.2102946929 - 95.0) * np.float32(0.01125)
-    # For the curve branch, use float32 throughout
     curve_val = np.float32(10.0) ** ((x_scaled - np.float32(420.0)) / np.float32(261.5)) * np.float32(0.19) - np.float32(0.01)
 
     out = np.where(x < cut, linear_val, curve_val)
@@ -74,8 +81,17 @@ def _slog3_to_linear(x: np.ndarray) -> np.ndarray:
 
 
 def _linear_to_srgb_curve(linear: np.ndarray) -> np.ndarray:
-    """Apply the sRGB OETF (linear -> sRGB gamma)."""
+    """Apply the sRGB OETF (linear -> sRGB gamma).
+
+    Uses Numba JIT when available for parallel per-pixel computation.
+    """
     linear = np.clip(linear, 0.0, 1.0).astype(np.float32)
+
+    if HAS_NUMBA:
+        from utils.numba_kernels import linear_to_srgb
+        return linear_to_srgb(linear)
+
+    # Numpy fallback
     out = np.where(
         linear <= 0.0031308,
         12.92 * linear,
@@ -171,11 +187,29 @@ def linear_to_srgb(linear_frame: np.ndarray) -> np.ndarray:
     return (srgb * 255.0).astype(np.uint8)
 
 
+def _get_slog3_to_srgb_lut_u8() -> np.ndarray:
+    """Return the cached combined S-Log3 -> sRGB uint8 LUT, building on first call.
+
+    This avoids recomputing the sRGB OETF on the 256-entry LUT every frame,
+    which was previously done inside _slog3_to_srgb_lut_8bit().
+    """
+    global _SLOG3_TO_SRGB_LUT_U8
+    if _SLOG3_TO_SRGB_LUT_U8 is None:
+        lut = _get_slog3_lut_8bit()  # uint8 -> float32 linear
+        srgb_lut = _linear_to_srgb_curve(lut / max(lut.max(), 1e-8))
+        _SLOG3_TO_SRGB_LUT_U8 = np.clip(srgb_lut * 255.0, 0, 255).astype(np.uint8)
+        logger.debug("Built combined S-Log3->sRGB LUT (cached for all frames)")
+    return _SLOG3_TO_SRGB_LUT_U8
+
+
 def _slog3_to_srgb_lut_8bit(img_uint8: np.ndarray) -> np.ndarray:
     """Fast S-Log3 -> sRGB conversion for 8-bit images via precomputed LUT.
 
     Applies the full S-Log3 EOTF + sRGB OETF in a single LUT lookup per
     channel, avoiding per-pixel float arithmetic entirely.
+
+    The combined LUT is cached at module level so it is built once and
+    reused across all frames in a batch.
 
     Args:
         img_uint8: HxWxC uint8 image in S-Log3 encoding.
@@ -183,17 +217,13 @@ def _slog3_to_srgb_lut_8bit(img_uint8: np.ndarray) -> np.ndarray:
     Returns:
         HxWxC uint8 image in sRGB gamma space.
     """
-    lut = _get_slog3_lut_8bit()  # uint8 -> float32 linear
-
-    # Apply sRGB OETF to the LUT entries to get a combined LUT
-    srgb_lut = _linear_to_srgb_curve(lut / max(lut.max(), 1e-8))
-    # Quantize to uint8
-    srgb_lut_u8 = np.clip(srgb_lut * 255.0, 0, 255).astype(np.uint8)
+    srgb_lut_u8 = _get_slog3_to_srgb_lut_u8()
 
     # cv2.LUT applies per-channel LUT lookup — extremely fast
     return cv2.LUT(img_uint8, srgb_lut_u8)
 
 
+@timed
 def batch_color_correct(
     frames_dir: str | Path,
     output_srgb_dir: str | Path,
@@ -280,15 +310,19 @@ def batch_color_correct(
     )
 
     # Build per-frame work items for parallel processing
-    from utils.parallel import parallel_map, get_optimal_workers
+    from utils.parallel import parallel_map
 
     def _process_single_frame(frame_path: Path) -> Path | None:
         """Process a single frame (LOG -> sRGB). Runs in a worker process."""
+        srgb_path = output_srgb_dir / frame_path.with_suffix(".png").name
+
+        # Skip if output already exists (supports resumable processing)
+        if srgb_path.exists():
+            return srgb_path
+
         img = cv2.imread(str(frame_path), cv2.IMREAD_UNCHANGED)
         if img is None:
             return None
-
-        srgb_path = output_srgb_dir / frame_path.with_suffix(".png").name
 
         # --- Fast 8-bit LUT path for slog3 ---
         if log_type == "slog3" and img.dtype == np.uint8 and output_linear_dir is None:

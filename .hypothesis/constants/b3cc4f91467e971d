@@ -1,0 +1,4 @@
+# file: D:\Projects\3D\src\sensors\colmap_priors.py
+# hypothesis_version: 6.151.9
+
+[0.01, 1000000.0, 'utf-8', 'w']

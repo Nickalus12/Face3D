@@ -91,6 +91,9 @@ def _extract_exif(photo_path: Path) -> dict[str, Any]:
 
     Returns dict with focal_length, focal_length_35mm, datetime,
     width, height, make, model, orientation, iso, exposure_time.
+
+    For large files (200MP DNG), avoids loading pixel data by reading
+    only the EXIF header.
     """
     try:
         import PIL.Image
@@ -99,8 +102,22 @@ def _extract_exif(photo_path: Path) -> dict[str, Any]:
         # Allow very large images
         PIL.Image.MAX_IMAGE_PIXELS = None
 
+        # PIL.Image.open() is lazy — doesn't load pixels.
+        # But we must NOT call .load() or access pixel data.
         img = PIL.Image.open(photo_path)
-        exif_raw = img._getexif() or {}
+
+        # Get dimensions from header (no pixel loading)
+        width, height = img.size
+
+        # Extract EXIF tags — for DNG/TIFF this reads the IFD without
+        # decoding the raw mosaic. For JPEG it reads the APP1 marker.
+        try:
+            exif_raw = img._getexif() or {}
+        except Exception:
+            exif_raw = {}
+
+        # Close immediately to release file handle (no pixel decode)
+        img.close()
 
         exif = {}
         for tag_id, value in exif_raw.items():
@@ -108,8 +125,8 @@ def _extract_exif(photo_path: Path) -> dict[str, Any]:
             exif[tag_name] = value
 
         metadata: dict[str, Any] = {
-            "width": img.width,
-            "height": img.height,
+            "width": width,
+            "height": height,
             "focal_length": None,
             "focal_length_35mm": None,
             "datetime": None,

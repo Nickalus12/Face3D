@@ -10,6 +10,8 @@ from typing import Optional
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 
+from utils.numba_kernels import HAS_NUMBA
+
 logger = logging.getLogger(__name__)
 
 
@@ -124,6 +126,9 @@ class MadgwickFilter:
     @staticmethod
     def _quat_mult(p: np.ndarray, r: np.ndarray) -> np.ndarray:
         """Hamilton quaternion product p * r, both as [w, x, y, z]."""
+        if HAS_NUMBA:
+            from utils.numba_kernels import quaternion_multiply
+            return quaternion_multiply(p, r)
         pw, px, py, pz = p
         rw, rx, ry, rz = r
         return np.array([
@@ -374,6 +379,15 @@ def compute_rotations(
             "Computed %d orientation estimates (complementary, alpha=%.3f)",
             n_samples, complementary_alpha,
         )
+    elif HAS_NUMBA:
+        # Fast path: run entire Madgwick filter in compiled code
+        from utils.numba_kernels import madgwick_filter_full, quaternion_to_rotation_matrix_batch
+        quats = madgwick_filter_full(accel, gyro, dt_arr, valid_mask, beta, sample_rate)
+        rotations = quaternion_to_rotation_matrix_batch(quats)
+        logger.info(
+            "Computed %d orientation estimates (Madgwick+Numba, rate=%.1f Hz, beta=%.3f)",
+            n_samples, sample_rate, beta,
+        )
     else:
         filt = MadgwickFilter(sample_rate=sample_rate, beta=beta)
         for i in range(n_samples):
@@ -448,7 +462,7 @@ def interpolate_rotations_to_frames(
         raise ValueError("Need at least 2 rotation samples for SLERP interpolation")
 
     # Build scipy Rotation objects
-    rots = Rotation.from_matrix(rotations)
+    Rotation.from_matrix(rotations)
 
     # Clamp frame timestamps to the IMU time range for extrapolation safety
     t_min, t_max = imu_timestamps[0], imu_timestamps[-1]

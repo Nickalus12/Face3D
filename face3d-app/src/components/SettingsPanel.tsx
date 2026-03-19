@@ -22,30 +22,42 @@ function Section({
   icon: Icon,
   children,
   defaultOpen = true,
+  badge,
 }: {
   title: string;
   icon: React.ComponentType<{ size?: number; className?: string }>;
   children: React.ReactNode;
   defaultOpen?: boolean;
+  badge?: string;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+    <div className="bg-zinc-900/80 border border-zinc-800/80 rounded-xl overflow-hidden hover:border-zinc-700/60 transition-colors duration-200">
       <button
         onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/[0.02] transition-colors"
+        className="w-full flex items-center gap-3 px-4 py-3.5 hover:bg-white/[0.02] transition-colors duration-150"
       >
-        <Icon size={16} className="text-zinc-400 shrink-0" />
-        <span className="text-[11px] font-bold tracking-wider text-zinc-500 uppercase flex-1 text-left">
+        <div className={`p-1.5 rounded-lg transition-colors duration-200 ${open ? 'bg-indigo-500/10' : 'bg-zinc-800/50'}`}>
+          <Icon size={14} className={`shrink-0 transition-colors duration-200 ${open ? 'text-indigo-400' : 'text-zinc-500'}`} />
+        </div>
+        <span className={`text-xs font-bold tracking-wider uppercase flex-1 text-left transition-colors duration-200 ${open ? 'text-zinc-300' : 'text-zinc-500'}`}>
           {title}
         </span>
-        {open ? (
-          <ChevronDown size={14} className="text-zinc-500" />
-        ) : (
-          <ChevronRight size={14} className="text-zinc-500" />
+        {badge && (
+          <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+            {badge}
+          </span>
         )}
+        <ChevronDown
+          size={14}
+          className={`text-zinc-500 transition-transform duration-200 ${open ? 'rotate-0' : '-rotate-90'}`}
+        />
       </button>
-      {open && <div className="px-4 pb-4 space-y-4">{children}</div>}
+      <div className={`collapsible-content ${open ? 'open' : ''}`}>
+        <div>
+          <div className="px-4 pb-4 space-y-4">{children}</div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -140,7 +152,7 @@ function NumberInput({
         >
           +
         </button>
-        {suffix && <span className="text-[10px] text-zinc-500 ml-1">{suffix}</span>}
+        {suffix && <span className="text-[11px] text-zinc-500 ml-1">{suffix}</span>}
       </div>
     </div>
   );
@@ -161,7 +173,7 @@ function Toggle({
     <div className="flex items-center justify-between gap-3">
       <div className="flex-1 min-w-0">
         <div className="text-xs text-zinc-400">{label}</div>
-        {description && <div className="text-[10px] text-zinc-600 mt-0.5">{description}</div>}
+        {description && <div className="text-[11px] text-zinc-600 mt-0.5">{description}</div>}
       </div>
       <button
         onClick={() => onChange(!checked)}
@@ -268,12 +280,12 @@ function PresetCard({
         </span>
         {isActive && <Check size={12} className="text-indigo-400" />}
       </div>
-      <div className="text-[10px] text-zinc-500 mb-2">{preset.description}</div>
+      <div className="text-[11px] text-zinc-500 mb-2">{preset.description}</div>
       <div className="flex gap-3">
-        <span className="text-[10px] text-zinc-400">
+        <span className="text-[11px] text-zinc-400">
           <span className="text-zinc-600">Time:</span> {preset.estimated_time}
         </span>
-        <span className="text-[10px] text-zinc-400">
+        <span className="text-[11px] text-zinc-400">
           <span className="text-zinc-600">VRAM:</span> {preset.estimated_vram}
         </span>
       </div>
@@ -343,13 +355,20 @@ export default function SettingsPanel() {
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800/60 shrink-0 bg-[#0a0a0b]/80 backdrop-blur-sm">
         <div>
-          <h1 className="text-sm font-semibold text-zinc-200 tracking-wide">Settings</h1>
-          <p className="text-[10px] text-zinc-500 mt-0.5">Configure pipeline parameters and system paths</p>
+          <h1 className="text-sm font-semibold text-zinc-200 tracking-wide flex items-center gap-2">
+            Settings
+            {isDirty && (
+              <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 animate-pulse">
+                Unsaved
+              </span>
+            )}
+          </h1>
+          <p className="text-[11px] text-zinc-500 mt-0.5">Configure pipeline parameters and system paths</p>
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={resetToDefaults}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-zinc-400 bg-zinc-800 border border-zinc-700 rounded-lg hover:text-zinc-200 hover:bg-zinc-700 transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-zinc-400 bg-zinc-800 border border-zinc-700 rounded-lg hover:text-zinc-200 hover:bg-zinc-700 transition-colors"
           >
             <RotateCcw size={12} />
             Reset to Defaults
@@ -357,7 +376,7 @@ export default function SettingsPanel() {
           <button
             onClick={handleSave}
             disabled={!isDirty || saving}
-            className={`flex items-center gap-1.5 px-4 py-1.5 text-[11px] font-medium rounded-lg transition-all ${
+            className={`flex items-center gap-1.5 px-4 py-1.5 text-xs font-medium rounded-lg transition-all ${
               saveSuccess
                 ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
                 : isDirty
@@ -416,7 +435,7 @@ export default function SettingsPanel() {
             step={50000}
             onChange={(v) => updateTraining({ max_gaussians: v })}
           />
-          <div className="text-[10px] text-zinc-600 -mt-2 pl-1">
+          <div className="text-[11px] text-zinc-600 -mt-2 pl-1">
             Est. VRAM: {estimateVram(training.max_gaussians)}
           </div>
 
@@ -533,7 +552,7 @@ export default function SettingsPanel() {
         {/* System Info */}
         <Section title="System Info" icon={Monitor} defaultOpen={false}>
           <div className="space-y-0.5">
-            <div className="text-[10px] font-bold tracking-wider text-zinc-600 uppercase mb-2">GPU</div>
+            <div className="text-[11px] font-bold tracking-wider text-zinc-600 uppercase mb-2">GPU</div>
             <InfoRow label="Name" value={gpuInfo?.name ?? 'Loading...'} />
             <InfoRow label="VRAM Total" value={gpuInfo?.memory_total ?? '--'} />
             <InfoRow label="VRAM Used" value={gpuInfo?.memory_used ?? '--'} />
@@ -541,14 +560,14 @@ export default function SettingsPanel() {
           </div>
 
           <div className="border-t border-zinc-800 pt-3 space-y-0.5">
-            <div className="text-[10px] font-bold tracking-wider text-zinc-600 uppercase mb-2">Python</div>
+            <div className="text-[11px] font-bold tracking-wider text-zinc-600 uppercase mb-2">Python</div>
             <InfoRow label="Version" value={pythonInfo?.version ?? 'Loading...'} />
             <InfoRow label="Conda Env" value={pythonInfo?.env_name ?? '--'} />
             <InfoRow label="Packages" value={pythonInfo ? `${pythonInfo.packages_count} installed` : '--'} />
           </div>
 
           <div className="border-t border-zinc-800 pt-3 space-y-0.5">
-            <div className="text-[10px] font-bold tracking-wider text-zinc-600 uppercase mb-2">System</div>
+            <div className="text-[11px] font-bold tracking-wider text-zinc-600 uppercase mb-2">System</div>
             <InfoRow label="OS" value={systemInfo?.os_version ?? 'Loading...'} />
             <InfoRow label="CPU" value={systemInfo?.cpu ?? '--'} />
             <InfoRow label="RAM" value={systemInfo ? `${systemInfo.ram_gb.toFixed(1)} GB` : '--'} />
@@ -556,7 +575,7 @@ export default function SettingsPanel() {
           </div>
 
           <div className="border-t border-zinc-800 pt-3 space-y-0.5">
-            <div className="text-[10px] font-bold tracking-wider text-zinc-600 uppercase mb-2">Disk (D:)</div>
+            <div className="text-[11px] font-bold tracking-wider text-zinc-600 uppercase mb-2">Disk (D:)</div>
             <InfoRow
               label="Free"
               value={systemInfo ? `${systemInfo.disk_free_gb.toFixed(1)} GB` : '--'}

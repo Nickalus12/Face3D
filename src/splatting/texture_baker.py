@@ -126,7 +126,6 @@ def bake_texture(
     # 4. Build raycasting scene for visibility tests
     # ------------------------------------------------------------------
     scene: o3d.t.geometry.RaycastingScene | None = None
-    raycast_available = True
     try:
         mesh_o3d = o3d.t.geometry.TriangleMesh()
         mesh_o3d.vertex.positions = o3d.core.Tensor(
@@ -153,11 +152,9 @@ def bake_texture(
                 _test_elapsed,
             )
             scene = None
-            raycast_available = False
     except Exception as e:
         logger.warning("Failed to build raycasting scene (%s); skipping visibility", e)
         scene = None
-        raycast_available = False
 
     # Precompute face normals
     mesh.fix_normals()
@@ -930,9 +927,9 @@ def _write_textured_obj(
     face_uvs = uv_coords.reshape(-1, 3, 2)  # (F, 3, 2)
 
     with open(obj_path, "w") as f:
-        f.write(f"# Face3D textured mesh\n")
+        f.write("# Face3D textured mesh\n")
         f.write(f"mtllib {mtl_path.name}\n")
-        f.write(f"usemtl face_texture\n\n")
+        f.write("usemtl face_texture\n\n")
 
         # Vertices
         for v in vertices:

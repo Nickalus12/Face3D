@@ -1,0 +1,4 @@
+# file: D:\Projects\3D\src\utils\visualization.py
+# hypothesis_version: 6.151.9
+
+[0.3, 0.5, 1.0, 127, 133, 146, 156, 160, 168, 174, 178, 200, 234, 244, 246, 255, 260, 275, 291, 296, 320, 323, 362, 375, 399, 405, 454, 466, 478, 512, 1000, '*.png', '.npy', 'RGB', 'contour', 'eyes', 'face3d.visualization', 'frame_*.png', 'landmarks', 'landmarks_2d', 'mouth', 'nose', 'turbo']

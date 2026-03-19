@@ -1,0 +1,4 @@
+# file: D:\Projects\3D\src\utils\colmap_io.py
+# hypothesis_version: 6.151.9
+
+[b'\x00', 0.0, 0.25, 0.5, 1.0, 2.0, '<2d', '<3B', '<3d', '<4d', '<I', '<II', '<IiQQ', '<Q', '<d', '<q', 'Camera', 'FOV', 'FULL_OPENCV', 'Image', 'OPENCV', 'OPENCV_FISHEYE', 'PINHOLE', 'Point3D', 'RADIAL', 'RADIAL_FISHEYE', 'SIMPLE_PINHOLE', 'SIMPLE_RADIAL', 'THIN_PRISM_FISHEYE', 'camera_id', 'error', 'height', 'id', 'image_ids', 'model', 'name', 'params', 'point2D_idxs', 'point3D_ids', 'qvec', 'rb', 'rgb', 'tvec', 'utf-8', 'width', 'xys', 'xyz']

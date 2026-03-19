@@ -1,0 +1,4 @@
+# file: D:\Projects\3D\src\depth\da3_unified.py
+# hypothesis_version: 6.151.9
+
+[b'\x00', 0.0, 1e-10, 1e-06, 0.05, 0.1, 0.15, 0.25, 0.3, 0.5, 0.8, 1.0, 1.1, 2.0, 10.0, 20.0, 30.0, 320.0, 123, 128, 255, 336, 504, 720, 1000, 1024, 1280, 5000, 10000, 100000, 2000000, '*.jpg', '*.png', '.tmp_data', '0', '<3B', '<3d', '<4d', '<BBB', '<I', '<Ii', '<Q', '<QQ', '<d', '<fff', '<fffBBB', 'aligned_dir', 'ascii', 'camera_id', 'cameras.bin', 'colmap', 'colmap_dir', 'conf_threshold_used', 'cuda', 'da3-base', 'da3-giant', 'da3-large', 'da3-small', 'da3metric-large', 'da3mono-large', 'dense_points.ply', 'depth', 'depth_aligned', 'depth_dir', 'effective_chunk_size', 'height', 'image_id', 'images.bin', 'mean_confidence', 'model_name', 'name', 'num_frames', 'num_frames_original', 'num_points', 'num_valid_poses', 'params', 'points3D.bin', 'process_res', 'qvec', 'rb', 'sparse', 'tvec', 'upper_bound_resize', 'use_ray_pose', 'utf-8', 'v2', 'wb', 'width']

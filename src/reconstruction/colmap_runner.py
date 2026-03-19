@@ -201,8 +201,7 @@ def _run_hloc_features(
     fall back to SIFT).
     """
     try:
-        from hloc import extract_features, match_features, pairs_from_retrieval, reconstruction
-        from hloc.utils.database import COLMAPDatabase
+        from hloc import extract_features, match_features, reconstruction
         logger.info("Using hloc SuperPoint+SuperGlue for feature extraction and matching")
 
         feature_conf = extract_features.confs["superpoint_aachen"]
@@ -211,7 +210,7 @@ def _run_hloc_features(
         hloc_dir = workspace_dir / "hloc"
         hloc_dir.mkdir(parents=True, exist_ok=True)
 
-        feature_path = extract_features.main(
+        extract_features.main(
             feature_conf, images_dir, export_dir=hloc_dir
         )
         # Generate pairs from sequential overlap (face capture orbits)

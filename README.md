@@ -25,9 +25,10 @@ Face3D takes a **video** of someone's face (shot on a Samsung Galaxy S25 Ultra) 
 - **Photorealistic rendering** from any angle via 2D Gaussian Splatting
 - **Clean triangle mesh** with 4K UV texture via SuGaR extraction
 - **Facial animation** driven by FLAME expression parameters (smile, surprise, etc.)
-- **Compressed export** for web/AR viewing (15x smaller files)
+- **Compressed export** — Draco compression, .splat web format, glTF 2.0 support
+- **Desktop app** — Tauri 2.0 + React app with immersive pipeline visualization
 
-Optionally feed in **Expert RAW photos** alongside video for even sharper texture detail.
+Optionally feed in **Expert RAW photos** and **Samsung Sensor Logger** data alongside video.
 
 ---
 
@@ -128,32 +129,33 @@ Optionally take **5-10 Expert RAW photos** at key angles (front, 3/4, profile).
 ### 3. Run
 
 ```bash
+# Auto-detect all inputs from a folder (recommended)
+python scripts/run_pipeline.py --content-dir content/New --session my_face
+
 # Video only
 python scripts/run_pipeline.py --video path/to/face_video.mp4
 
-# Video + Expert RAW photos (higher quality textures)
-python scripts/run_pipeline.py --video face_video.mp4 --photos photo1.jpg photo2.jpg
-
 # Resume from a specific stage
-python scripts/run_pipeline.py --video face_video.mp4 --session SESSION_ID --start-stage 13
+python scripts/run_pipeline.py --content-dir content/New --session my_face --start-stage 13
 
-# Force re-run a stage
-python scripts/run_pipeline.py --video face_video.mp4 --session SESSION_ID --start-stage 10 --end-stage 10 --force
+# Desktop app (Tauri)
+cd face3d-app && npm run tauri dev
 ```
 
 ### 4. Output
 
 ```
 data/output/{session}/
-├── gaussians.ply                # Full Gaussian splat model
-├── gaussians_compressed.ply     # Compressed (15x smaller)
-├── mesh.ply                     # SuGaR Poisson mesh
-├── mesh_textured.obj            # UV-textured mesh
-├── texture.png                  # 4K face texture map
-├── renders/                     # Turntable views + video
-├── animations/                  # Smile, surprise, head turn videos
-├── previews/                    # Depth maps, landmarks, masks
+├── gaussians.ply                # Full Gaussian splat model (15 MB)
+├── gaussians_compressed.ply     # Quantized (7.5 MB, 2x smaller)
+├── gaussians_draco.gs3          # Draco compressed (6.6 MB, 2.3x smaller)
+├── mesh.obj / mesh.ply          # SuGaR Poisson mesh
+├── mesh_textured.obj            # UV-textured mesh + material
+├── texture.png                  # Face texture map
+├── renders/                     # 30 turntable views + MP4 video
+├── previews/                    # Depth maps, landmarks, masks, turntable GIF
 ├── report.html                  # Self-contained quality report
+├── pipeline_timing.json         # Per-stage performance profiling
 └── metrics.jsonl                # Per-stage metrics
 ```
 
@@ -182,14 +184,35 @@ data/output/{session}/
 | **[MediaPipe](https://github.com/google-ai-edge/mediapipe)** | 478-point face landmarks | Bridge between 2D detection and 3D FLAME fitting |
 | **[COLMAP](https://colmap.github.io)** | Structure-from-Motion | Fallback when DA3 is unavailable |
 
+### Desktop App (Tauri 2.0)
+
+| Feature | Description |
+|---------|-------------|
+| **Pipeline View** | Immersive 15-stage timeline with live progress, animations, and stage descriptions |
+| **3D Viewer** | Real-time PLY point cloud viewer with React Three Fiber |
+| **Gallery** | Multi-category image browser with lightbox and before/after comparison |
+| **Sensor Panel** | IMU/quaternion visualization with animated 3D orientation cube |
+| **Metrics** | Training curves, stage timing bars, quality dashboard |
+| **libSQL Database** | Turso-powered session tracking, training metrics, vector search for ML prior |
+
 ### Training Innovations
 
 - **2D Gaussian Splatting** — flat disc primitives for better face surfaces
 - **6 loss functions** — L1, D-SSIM, normal consistency, distortion, LPIPS, depth supervision
 - **FLAME-bound initialization** — Gaussians on mesh triangles with barycentric coordinates
-- **Appearance embedding** — per-frame learned exposure/white-balance correction
-- **Progressive training** — start at half resolution, scale up at 50% iterations
-- **Photo-weighted sampling** — Expert RAW views sampled 3x more during training
+- **Joint FLAME optimization** — GaussianSwap-inspired temporal consistency (shared identity, per-frame expression)
+- **Progressive training** — 3-stage resolution (1/4 → 1/2 → full) with staged loss introduction
+- **Photo-weighted sampling** — Expert RAW views sampled 3-5x more during training
+- **Draco compression** — Industry-standard 3D compression (2.3x file size reduction)
+
+### Performance & ML
+
+- **Numba JIT kernels** — 6.5x faster color correction, 131x faster Madgwick filter
+- **Pipeline profiler** — Per-stage timing, GPU memory tracking, throughput metrics
+- **Experience replay buffer** — Each scan improves future reconstructions via ML prior
+- **Face prior network** — 50K-param MLP predicts initialization from FLAME params
+- **Taichi physics** — Physics-aware mesh refinement (Laplacian smoothing, anatomical constraints)
+- **570+ tests** — Syrupy snapshots, Pandera contracts, Mutmut mutation testing, property-based tests
 
 ---
 
@@ -246,30 +269,25 @@ The pipeline is designed to be resilient:
 
 ```
 Face3D/
-├── config/
-│   ├── pipeline.yaml              # Master configuration
-│   ├── expressions.yaml           # FLAME expression presets
-│   └── camera_profiles/
-│       └── s25_ultra.yaml         # Samsung S25 Ultra specs
-├── scripts/
-│   ├── run_pipeline.py            # Pipeline orchestrator (14 stages)
-│   └── setup_environment.sh       # Automated env setup
+├── config/pipeline.yaml           # Master configuration (all hyperparameters)
+├── scripts/run_pipeline.py        # Pipeline orchestrator (15 stages)
 ├── src/
-│   ├── capture/                   # Video + photo ingestion
-│   ├── sensors/                   # IMU integration
-│   ├── depth/                     # DA3 + DA2 depth estimation
-│   ├── reconstruction/            # COLMAP, FLAME, segmentation
-│   ├── splatting/                 # Training, export, animation
-│   └── utils/                     # Shared utilities
-├── Models/                        # Pretrained weights (not in repo)
-│   └── Flame/                     # FLAME model files
+│   ├── capture/                   # Video frame extraction, Expert RAW, quality filtering
+│   ├── sensors/                   # Samsung Sensor Logger parsing, orientation fusion
+│   ├── depth/                     # DA3 unified (depth + poses), AnyDepth fallback
+│   ├── reconstruction/            # COLMAP, MediaPipe, FLAME, face segmentation
+│   ├── splatting/                 # 2DGS training, export, compression, animation
+│   ├── validation/                # Pandera data contracts for stage-to-stage validation
+│   ├── ml/                        # Experience replay, face prior network, Taichi physics
+│   └── utils/                     # COLMAP I/O, Numba kernels, Triton kernels, timing
+├── face3d-app/                    # Tauri 2.0 desktop app
+│   ├── src/                       # React + TypeScript frontend (25+ components)
+│   ├── src-tauri/                 # Rust backend (7 command modules + libSQL)
+│   └── package.json
+├── tests/                         # 570+ tests (pytest, Hypothesis, Syrupy, Pandera, Mutmut)
+├── Models/Flame/                  # FLAME model files (not in repo)
 ├── data/                          # Pipeline I/O (not in repo)
-│   ├── raw/                       # Input videos + photos
-│   ├── processed/                 # Intermediate results
-│   └── output/                    # Final outputs
-├── environment.yaml               # Conda environment spec
-├── LICENSE                        # GPL-3.0
-└── README.md
+└── LICENSE                        # GPL-3.0
 ```
 
 ---

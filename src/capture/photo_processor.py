@@ -17,7 +17,6 @@ import logging
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 import cv2
 import numpy as np

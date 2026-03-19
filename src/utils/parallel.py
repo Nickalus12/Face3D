@@ -103,21 +103,39 @@ def parallel_map(
     # Map future -> original index so we can reassemble in order
     results_ordered: list[R | None] = [None] * len(items_list)
 
-    with executor_cls(max_workers=max_workers) as executor:
-        future_to_idx: dict[Future, int] = {}
-        for idx, item in enumerate(items_list):
-            fut = executor.submit(fn, item)
-            future_to_idx[fut] = idx
+    def _run_with_executor(cls: type) -> list[R | None]:
+        results: list[R | None] = [None] * len(items_list)
+        with cls(max_workers=max_workers) as executor:
+            future_to_idx: dict[Future, int] = {}
+            for idx, item in enumerate(items_list):
+                fut = executor.submit(fn, item)
+                future_to_idx[fut] = idx
 
-        with tqdm(total=len(items_list), desc=desc) as pbar:
-            for future in as_completed(future_to_idx):
-                idx = future_to_idx[future]
-                try:
-                    results_ordered[idx] = future.result()
-                except Exception as exc:
-                    logger.warning(
-                        "%s: item %d failed: %s", desc, idx, exc
-                    )
-                pbar.update(1)
+            with tqdm(total=len(items_list), desc=desc) as pbar:
+                for future in as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    try:
+                        results[idx] = future.result()
+                    except Exception as exc:
+                        logger.warning(
+                            "%s: item %d failed: %s", desc, idx, exc
+                        )
+                    pbar.update(1)
+        return results
+
+    # ProcessPoolExecutor can't pickle closures/lambdas/nested functions.
+    # Auto-fallback to ThreadPoolExecutor when that happens.
+    if executor_cls is ProcessPoolExecutor:
+        import pickle
+        try:
+            pickle.dumps(fn)
+        except (pickle.PicklingError, AttributeError, TypeError):
+            logger.debug(
+                "%s: function %s not picklable, falling back to threads",
+                desc, fn.__name__,
+            )
+            executor_cls = ThreadPoolExecutor
+
+    results_ordered = _run_with_executor(executor_cls)
 
     return results_ordered  # type: ignore[return-value]

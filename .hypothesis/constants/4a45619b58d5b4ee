@@ -1,0 +1,4 @@
+# file: D:\Projects\3D\src\capture\multi_res_processor.py
+# hypothesis_version: 6.151.9
+
+[0.0, 0.0031308, 0.055, 0.25, 0.5, 1.0, 1.055, 1.5, 2.0, 2.4, 12.92, 256.0, 65535.0, 300, 600, 1440, 1920, '  %s: %d files', '  -> %s: %dx%d %s', '  -> %s: %s', '--database_path', '--image_path', '--input_path', '--output_path', '.dng', '.jpeg', '.jpg', '.tif', '.tiff', '0', '0_multi_lens', '0_wide', '1', '8192', 'Failed to read: %s', 'Matching failed: %s', 'PINHOLE', 'Photo not found: %s', 'bit_depth', 'bundle_adjuster', 'cameras.bin', 'cameras.txt', 'crop_height', 'crop_info', 'crop_width', 'database.db', 'display', 'exhaustive_matcher', 'face_crops', 'feature_extractor', 'full', 'full_height', 'full_width', 'image_registrator', 'images.bin', 'images.txt', 'path', 'photo_main_200mp', 'photo_wide_23mm', 'points3D.bin', 'points3D.txt', 'quarter', 'resolution', 'source', 'utf-8', 'x1', 'x2', 'y1', 'y2']

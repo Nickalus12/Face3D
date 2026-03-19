@@ -553,12 +553,12 @@ class TestGaussianTrainer:
         """TrainConfig has sensible defaults."""
         pytest.importorskip("torch")
         pytest.importorskip("open3d")
-        from splatting.trainer import TrainConfig
+        from splatting.trainer import TrainingConfig
 
-        config = TrainConfig()
-        assert config.max_iterations > 0
-        assert config.lr_position > 0
-        assert config.lr_opacity > 0
+        config = TrainingConfig()
+        assert config.iterations > 0
+        assert config.lr_means > 0
+        assert config.lr_opacities > 0
 
     @pytest.mark.cuda
     @pytest.mark.slow

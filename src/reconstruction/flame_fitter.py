@@ -12,9 +12,9 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from tqdm import tqdm
+
+from utils.timing import timed
 
 logger = logging.getLogger(__name__)
 
@@ -553,6 +553,297 @@ class FLAMEFitter:
         return shape_reg + expr_reg
 
 
+# ── Joint FLAME optimization (GaussianSwap-inspired) ────────────────────────
+
+
+def joint_optimize_flame(
+    per_frame_params: list[dict],
+    landmarks_per_frame: list[np.ndarray],
+    cameras: list[dict],
+    flame_model,
+    landmark_embedding: dict,
+    num_keyframes: int = 10,
+    joint_iterations: int = 200,
+    temporal_weight: float = 0.1,
+    device: str = "cuda",
+) -> list[dict]:
+    """Joint FLAME optimization across keyframes for temporal consistency.
+
+    Approach (inspired by GaussianSwap, ICLR 2026):
+    1. Select keyframes (uniformly sampled + high-confidence frames)
+    2. Share shape parameters across all frames (identity is constant)
+    3. Optimize shared shape + per-frame expression/pose jointly
+    4. Add temporal smoothness loss between adjacent frames
+    5. Propagate optimized shape back to all frames
+
+    Loss:
+    L = L_landmark + lambda_shape * L_shape_reg + lambda_temporal * L_temporal
+
+    Where L_temporal = sum ||expr_t - expr_{t-1}||^2 + ||pose_t - pose_{t-1}||^2
+
+    Args:
+        per_frame_params: Output from per-frame fitting (list of dicts with
+            'shape_params', 'expression_params', 'jaw_pose', 'neck_pose',
+            'global_rotation', 'translation', 'loss').
+        landmarks_per_frame: List of (478, 2) landmark arrays per frame.
+        cameras: List of camera dicts with 'K', 'R', 't'.
+        flame_model: An instance of FLAMEModel.
+        landmark_embedding: Dict with 'lmk_faces_idx', 'lmk_bary_coords',
+            'landmark_indices'.
+        num_keyframes: Number of keyframes to sample for joint optimization.
+        joint_iterations: Number of Adam iterations for joint stage.
+        temporal_weight: Weight for temporal smoothness loss term.
+        device: Torch device string.
+
+    Returns:
+        Updated per_frame_params list with temporally consistent parameters.
+        The shared shape is propagated to all frames.
+    """
+    num_frames = len(per_frame_params)
+    if num_frames < 3:
+        logger.info("Joint optimization skipped: only %d frames (need >= 3)", num_frames)
+        return per_frame_params
+
+    dev = torch.device(device if torch.cuda.is_available() else "cpu")
+    lmk_idx = landmark_embedding["landmark_indices"]
+    lmk_faces_idx = landmark_embedding["lmk_faces_idx"]
+    lmk_bary_coords = landmark_embedding["lmk_bary_coords"]
+    lmk_weights = _build_landmark_weights(lmk_idx, dev)
+
+    # ── 1. Select keyframes ──────────────────────────────────────────
+    num_kf = min(num_keyframes, num_frames)
+
+    # Uniform sampling indices
+    uniform_indices = set(np.linspace(0, num_frames - 1, num_kf, dtype=int).tolist())
+
+    # Add high-confidence frames (lowest per-frame loss)
+    frame_losses = [p.get("loss", float("inf")) for p in per_frame_params]
+    sorted_by_loss = np.argsort(frame_losses)
+    # Add top-confidence frames until we reach num_kf
+    for idx in sorted_by_loss:
+        if len(uniform_indices) >= num_kf:
+            break
+        uniform_indices.add(int(idx))
+
+    keyframe_indices = sorted(uniform_indices)
+    logger.info(
+        "Joint optimization: %d keyframes selected from %d total frames",
+        len(keyframe_indices), num_frames,
+    )
+
+    # ── 2. Initialize optimizable parameters ─────────────────────────
+    # Shared shape: average of per-frame shapes (identity should be constant)
+    shape_arrays = [p["shape_params"].flatten() for p in per_frame_params]
+    avg_shape = np.mean(shape_arrays, axis=0)
+    len(avg_shape)
+
+    shared_shape = torch.tensor(
+        avg_shape, dtype=torch.float32, device=dev
+    ).unsqueeze(0).requires_grad_(True)  # (1, N_shape)
+
+    # Per-keyframe expression, jaw_pose, neck_pose, global_rot, translation
+    kf_expr = []
+    kf_jaw = []
+    kf_neck = []
+    kf_rot = []
+    kf_trans = []
+    for ki in keyframe_indices:
+        p = per_frame_params[ki]
+        kf_expr.append(torch.tensor(
+            p["expression_params"].flatten(), dtype=torch.float32, device=dev
+        ).unsqueeze(0).requires_grad_(True))
+        kf_jaw.append(torch.tensor(
+            p["jaw_pose"].flatten(), dtype=torch.float32, device=dev
+        ).unsqueeze(0).requires_grad_(True))
+        kf_neck.append(torch.tensor(
+            p["neck_pose"].flatten(), dtype=torch.float32, device=dev
+        ).unsqueeze(0).requires_grad_(True))
+        kf_rot.append(torch.tensor(
+            p["global_rotation"].flatten(), dtype=torch.float32, device=dev
+        ).unsqueeze(0).requires_grad_(True))
+        kf_trans.append(torch.tensor(
+            p["translation"].flatten(), dtype=torch.float32, device=dev
+        ).unsqueeze(0).requires_grad_(True))
+
+    # Prepare target landmarks and cameras for keyframes
+    kf_targets = []
+    kf_K = []
+    kf_R = []
+    kf_t = []
+    for ki in keyframe_indices:
+        lm2d = landmarks_per_frame[ki][lmk_idx]
+        kf_targets.append(torch.tensor(lm2d, dtype=torch.float32, device=dev))
+        cam = cameras[ki]
+        kf_K.append(torch.tensor(cam["K"], dtype=torch.float32, device=dev).reshape(3, 3))
+        kf_R.append(torch.tensor(cam["R"], dtype=torch.float32, device=dev).reshape(3, 3))
+        kf_t.append(torch.tensor(cam["t"], dtype=torch.float32, device=dev).reshape(3, 1))
+
+    # ── 3. Build optimizer ───────────────────────────────────────────
+    all_optim_params = [shared_shape]
+    for i in range(len(keyframe_indices)):
+        all_optim_params.extend([kf_expr[i], kf_jaw[i], kf_neck[i], kf_rot[i], kf_trans[i]])
+
+    optimizer = torch.optim.Adam(all_optim_params, lr=0.005)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=joint_iterations, eta_min=0.0005
+    )
+
+    flame = flame_model.to(dev)
+    flame.eval()
+
+    # Record pre-joint loss for comparison
+    pre_joint_losses = [per_frame_params[ki].get("loss", float("inf")) for ki in keyframe_indices]
+
+    # ── 4. Joint optimization loop ───────────────────────────────────
+    best_loss = float("inf")
+    best_state = None
+    loss_history = []
+
+    n_kf = len(keyframe_indices)
+
+    for it in range(joint_iterations):
+        optimizer.zero_grad()
+
+        total_proj_loss = torch.tensor(0.0, device=dev)
+
+        for i in range(n_kf):
+            result = flame(
+                shape_params=shared_shape,
+                expression_params=kf_expr[i],
+                jaw_pose=kf_jaw[i],
+                neck_pose=kf_neck[i],
+                global_rotation=kf_rot[i],
+                translation=kf_trans[i],
+            )
+            vertices = result["vertices"]
+            lmk_3d = flame.get_landmarks(vertices, lmk_faces_idx, lmk_bary_coords)
+            lmk_3d = lmk_3d.float()[0]  # (K, 3)
+
+            # Projection loss
+            pts_cam = (kf_R[i] @ lmk_3d.T + kf_t[i]).T
+            depth = pts_cam[:, 2:3].clamp(min=1e-6)
+            pts_norm = pts_cam[:, :2] / depth
+            fx, fy = kf_K[i][0, 0], kf_K[i][1, 1]
+            cx, cy = kf_K[i][0, 2], kf_K[i][1, 2]
+            pts_2d = torch.stack([
+                fx * pts_norm[:, 0] + cx,
+                fy * pts_norm[:, 1] + cy,
+            ], dim=1)
+
+            per_lmk = F.smooth_l1_loss(pts_2d, kf_targets[i], beta=2.0, reduction="none").sum(dim=1)
+            total_proj_loss = total_proj_loss + (per_lmk * lmk_weights).mean()
+
+        total_proj_loss = total_proj_loss / n_kf
+
+        # Shape regularization
+        shape_reg = 1e-4 * torch.sum(shared_shape ** 2)
+
+        # Expression regularization
+        expr_reg = torch.tensor(0.0, device=dev)
+        for i in range(n_kf):
+            expr_reg = expr_reg + torch.sum(kf_expr[i] ** 2)
+        expr_reg = 1e-3 * expr_reg / n_kf
+
+        # Temporal smoothness loss (adjacent keyframes)
+        temporal_loss = torch.tensor(0.0, device=dev)
+        if n_kf > 1 and temporal_weight > 0:
+            for i in range(1, n_kf):
+                temporal_loss = temporal_loss + torch.sum((kf_expr[i] - kf_expr[i - 1]) ** 2)
+                temporal_loss = temporal_loss + torch.sum((kf_jaw[i] - kf_jaw[i - 1]) ** 2)
+                temporal_loss = temporal_loss + torch.sum((kf_rot[i] - kf_rot[i - 1]) ** 2)
+            temporal_loss = temporal_weight * temporal_loss / (n_kf - 1)
+
+        total_loss = total_proj_loss + shape_reg + expr_reg + temporal_loss
+        total_loss.backward()
+        optimizer.step()
+        scheduler.step()
+
+        current_loss = total_loss.item()
+        loss_history.append(current_loss)
+
+        if current_loss < best_loss:
+            best_loss = current_loss
+            best_state = {
+                "shared_shape": shared_shape.detach().cpu().clone(),
+                "kf_expr": [e.detach().cpu().clone() for e in kf_expr],
+                "kf_jaw": [j.detach().cpu().clone() for j in kf_jaw],
+                "kf_neck": [n.detach().cpu().clone() for n in kf_neck],
+                "kf_rot": [r.detach().cpu().clone() for r in kf_rot],
+                "kf_trans": [t.detach().cpu().clone() for t in kf_trans],
+            }
+
+        if it % 50 == 0:
+            logger.info(
+                "Joint iter %3d | proj=%.6f shape_reg=%.6f expr_reg=%.6f temp=%.6f total=%.6f",
+                it, total_proj_loss.item(), shape_reg.item(), expr_reg.item(),
+                temporal_loss.item(), current_loss,
+            )
+
+    # ── 5. Propagate results back to all frames ──────────────────────
+    if best_state is None:
+        logger.warning("Joint optimization produced no improvement, keeping per-frame results")
+        return per_frame_params
+
+    optimized_shape = best_state["shared_shape"].numpy()
+
+    # Update keyframe params
+    for i, ki in enumerate(keyframe_indices):
+        per_frame_params[ki]["shape_params"] = optimized_shape.copy()
+        per_frame_params[ki]["expression_params"] = best_state["kf_expr"][i].numpy()
+        per_frame_params[ki]["jaw_pose"] = best_state["kf_jaw"][i].numpy()
+        per_frame_params[ki]["neck_pose"] = best_state["kf_neck"][i].numpy()
+        per_frame_params[ki]["global_rotation"] = best_state["kf_rot"][i].numpy()
+        per_frame_params[ki]["translation"] = best_state["kf_trans"][i].numpy()
+
+    # Propagate shared shape to non-keyframes
+    for fi in range(num_frames):
+        if fi not in keyframe_indices:
+            per_frame_params[fi]["shape_params"] = optimized_shape.copy()
+
+    # Interpolate expression/pose for non-keyframes between keyframes
+    for fi in range(num_frames):
+        if fi in keyframe_indices:
+            continue
+        # Find bracketing keyframes
+        left_ki = None
+        right_ki = None
+        for ki in keyframe_indices:
+            if ki <= fi:
+                left_ki = ki
+            if ki >= fi and right_ki is None:
+                right_ki = ki
+        if left_ki is None:
+            left_ki = keyframe_indices[0]
+        if right_ki is None:
+            right_ki = keyframe_indices[-1]
+        if left_ki == right_ki:
+            # Frame is before first or after last keyframe; copy nearest
+            continue
+        # Linear interpolation factor
+        t_interp = (fi - left_ki) / max(right_ki - left_ki, 1)
+        keyframe_indices.index(left_ki)
+        keyframe_indices.index(right_ki)
+        for param_key in ["expression_params", "jaw_pose"]:
+            left_val = per_frame_params[left_ki][param_key]
+            right_val = per_frame_params[right_ki][param_key]
+            per_frame_params[fi][param_key] = (
+                left_val * (1.0 - t_interp) + right_val * t_interp
+            )
+
+    # Log improvement
+    post_joint_losses = []
+    for ki in keyframe_indices:
+        post_joint_losses.append(per_frame_params[ki].get("loss", float("inf")))
+    pre_mean = np.mean([v for v in pre_joint_losses if np.isfinite(v)]) if pre_joint_losses else 0
+    logger.info(
+        "Joint optimization complete: %d iterations, best_loss=%.6f, "
+        "pre-joint avg keyframe loss=%.4f, shape consistency enforced across %d frames",
+        joint_iterations, best_loss, pre_mean, num_frames,
+    )
+
+    return per_frame_params
+
+
 # ── Frame matching utilities ─────────────────────────────────────────────────
 
 
@@ -734,6 +1025,7 @@ def _render_flame_overlay(
         return False
 
 
+@timed
 def fit_flame_to_sequence(
     frames_dir: Path,
     landmarks_dir: Path,
@@ -741,6 +1033,7 @@ def fit_flame_to_sequence(
     flame_model_path: Path,
     embedding_path: Path,
     output_dir: Path,
+    fitting_config: Optional[dict] = None,
 ) -> dict:
     """End-to-end FLAME fitting to a multi-view capture sequence.
 
@@ -918,6 +1211,81 @@ def fit_flame_to_sequence(
         frame_confidence_weights=frame_confidence_weights,
     )
 
+    # ── Joint FLAME optimization (GaussianSwap-inspired) ──────────────
+    # Parse fitting config for joint optimization settings
+    _fitting_cfg = fitting_config or {}
+    _joint_enabled = _fitting_cfg.get("joint_optimization", True)
+
+    if _joint_enabled and num_matched >= 3:
+        _joint_keyframes = _fitting_cfg.get("joint_keyframes", 10)
+        _joint_iters = _fitting_cfg.get("joint_iterations", 200)
+        _temporal_weight = _fitting_cfg.get("temporal_smoothness_weight", 0.1)
+
+        logger.info(
+            "Running joint FLAME optimization: keyframes=%d, iterations=%d, "
+            "temporal_weight=%.3f",
+            _joint_keyframes, _joint_iters, _temporal_weight,
+        )
+
+        # Build per-frame params list from the single-fit result
+        # The existing fit produces one shared result; replicate it per frame
+        # so joint optimization can refine per-frame expression/pose
+        per_frame_params = []
+        for fi in range(num_matched):
+            per_frame_params.append({
+                "shape_params": result["shape_params"].copy(),
+                "expression_params": result["expression_params"].copy(),
+                "jaw_pose": result["jaw_pose"].copy(),
+                "neck_pose": result["neck_pose"].copy(),
+                "global_rotation": result["global_rotation"].copy(),
+                "translation": result["translation"].copy(),
+                "loss": result["loss"],
+            })
+
+        per_frame_params = joint_optimize_flame(
+            per_frame_params=per_frame_params,
+            landmarks_per_frame=landmarks_2d_per_frame,
+            cameras=camera_list,
+            flame_model=flame,
+            landmark_embedding=embedding,
+            num_keyframes=_joint_keyframes,
+            joint_iterations=_joint_iters,
+            temporal_weight=_temporal_weight,
+        )
+
+        # Use the first keyframe's result as the canonical output
+        # (shape is shared; expression/pose from the most frontal frame)
+        canonical_idx = frontal_idx if frontal_idx is not None else 0
+        result["shape_params"] = per_frame_params[canonical_idx]["shape_params"]
+        result["expression_params"] = per_frame_params[canonical_idx]["expression_params"]
+        result["jaw_pose"] = per_frame_params[canonical_idx]["jaw_pose"]
+        result["neck_pose"] = per_frame_params[canonical_idx]["neck_pose"]
+        result["global_rotation"] = per_frame_params[canonical_idx]["global_rotation"]
+        result["translation"] = per_frame_params[canonical_idx]["translation"]
+        result["joint_optimized"] = True
+        result["per_frame_params"] = per_frame_params
+
+        # Regenerate vertices with the joint-optimized parameters
+        with torch.no_grad():
+            dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            final_result = flame.to(dev)(
+                shape_params=torch.tensor(result["shape_params"], dtype=torch.float32, device=dev),
+                expression_params=torch.tensor(result["expression_params"], dtype=torch.float32, device=dev),
+                jaw_pose=torch.tensor(result["jaw_pose"], dtype=torch.float32, device=dev),
+                neck_pose=torch.tensor(result["neck_pose"], dtype=torch.float32, device=dev),
+                global_rotation=torch.tensor(result["global_rotation"], dtype=torch.float32, device=dev),
+                translation=torch.tensor(result["translation"], dtype=torch.float32, device=dev),
+            )
+            result["vertices"] = final_result["vertices"].cpu().numpy()
+            result["faces"] = final_result["faces"].cpu().numpy()
+
+        logger.info("Joint optimization applied — shape consistent across %d frames", num_matched)
+    elif _joint_enabled and num_matched < 3:
+        logger.info("Joint optimization skipped: only %d matched frames", num_matched)
+        result["joint_optimized"] = False
+    else:
+        result["joint_optimized"] = False
+
     # ── Save outputs ───────────────────────────────────────────────────
     # Save parameters
     params_path = output_dir / "flame_params.npz"
@@ -931,6 +1299,25 @@ def fit_flame_to_sequence(
         translation=result["translation"],
     )
     logger.info("Saved FLAME parameters to %s", params_path)
+
+    # Save per-frame parameters if joint optimization produced them
+    if result.get("joint_optimized") and "per_frame_params" in result:
+        per_frame_dir = output_dir / "per_frame"
+        per_frame_dir.mkdir(parents=True, exist_ok=True)
+        for fi, pfp in enumerate(result["per_frame_params"]):
+            np.savez(
+                str(per_frame_dir / f"frame_{fi:04d}.npz"),
+                shape_params=pfp["shape_params"],
+                expression_params=pfp["expression_params"],
+                jaw_pose=pfp["jaw_pose"],
+                neck_pose=pfp["neck_pose"],
+                global_rotation=pfp["global_rotation"],
+                translation=pfp["translation"],
+            )
+        logger.info(
+            "Saved %d per-frame FLAME parameters to %s",
+            len(result["per_frame_params"]), per_frame_dir,
+        )
 
     # Save mesh as OBJ
     mesh_path = output_dir / "fitted_mesh.obj"
@@ -948,6 +1335,7 @@ def fit_flame_to_sequence(
             "num_iterations": len(result["loss_history"]),
             "num_views": len(camera_list),
             "scale_factor": scale_factor,
+            "joint_optimized": result.get("joint_optimized", False),
         }
         with open(convergence_path, "w", encoding="utf-8") as fh:
             json.dump(convergence_data, fh)

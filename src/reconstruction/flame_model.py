@@ -12,7 +12,6 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -312,7 +311,7 @@ class FLAMEModel(nn.Module):
         # Get triangle vertex indices: (K, 3)
         tri_verts = self.faces[faces_idx]  # (K, 3) — vertex indices
 
-        batch_size = vertices.shape[0]
+        vertices.shape[0]
         # Gather triangle vertex positions: (B, K, 3, 3)
         v0 = vertices[:, tri_verts[:, 0]]  # (B, K, 3)
         v1 = vertices[:, tri_verts[:, 1]]

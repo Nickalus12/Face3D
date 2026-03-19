@@ -12,13 +12,42 @@ Usage:
     python scripts/run_pipeline.py --content-dir content/New  # Auto-detect all inputs
 """
 
+import os
+import sys
+
+# ── CUDA environment setup (MUST happen before ANY CUDA/gsplat imports) ──
+if os.name == "nt":
+    from pathlib import Path as _P
+    _cuda_home = os.environ.get("CUDA_HOME", "")
+    if not _cuda_home:
+        for _ver in ("v12.8", "v12.6", "v12.4", "v12.1"):
+            _c = f"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/{_ver}"
+            if _P(_c).exists():
+                os.environ["CUDA_HOME"] = _c
+                _cuda_home = _c
+                break
+    if _cuda_home:
+        _cb = str(_P(_cuda_home) / "bin")
+        if _cb not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = _cb + ";" + os.environ.get("PATH", "")
+        _mb = _P("C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC")
+        if _mb.exists():
+            for _mv in sorted(_mb.iterdir(), reverse=True):
+                _cl = _mv / "bin/Hostx64/x64/cl.exe"
+                if _cl.exists():
+                    _cd = str(_cl.parent)
+                    if _cd not in os.environ.get("PATH", ""):
+                        os.environ["PATH"] = _cd + ";" + os.environ.get("PATH", "")
+                    break
+    if not os.environ.get("TORCH_CUDA_ARCH_LIST"):
+        os.environ["TORCH_CUDA_ARCH_LIST"] = "8.6"
+
 import argparse
 import json
 import logging
 import shutil
 import struct
 import subprocess
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -33,10 +62,22 @@ PIL.Image.MAX_IMAGE_PIXELS = None
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+# CUDA env already set at top of file (before any imports)
+# Early CUDA/gsplat validation — fail within 2 seconds, not after 20 minutes
+from splatting.cuda_check import check_gsplat_cuda as _check_cuda
+_cuda_ok, _cuda_err, _cuda_backend = _check_cuda()
+if not _cuda_ok:
+    print(f"[WARNING] gsplat CUDA not available: {_cuda_err}")
+    print("[WARNING] GPU training (Stage 13) will fail. Fix CUDA setup first.")
+
+from utils.timing import PipelineProfiler
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
+    stream=sys.stdout,  # Force stdout — Tauri captures both stdout+stderr causing duplicates
+    force=True,
 )
 log = logging.getLogger("face3d")
 
@@ -391,13 +432,17 @@ def _run_da3_unified_stage(config: dict, session: dict) -> bool:
 
     da3_cfg = recon_cfg.get("da3", {})
     process_res = da3_cfg.get("process_res", 0)
-    use_ray_pose = da3_cfg.get("use_ray_pose", False)
+    use_ray_pose = da3_cfg.get("use_ray_pose", True)
     chunk_size = da3_cfg.get("chunk_size", 16)
     conf_threshold = da3_cfg.get("conf_threshold", 0.0)
     conf_percentile = da3_cfg.get("conf_percentile", 30.0)
     deduplicate = da3_cfg.get("deduplicate", True)
     dedup_threshold = da3_cfg.get("dedup_threshold", 5)
     use_streaming_ply = da3_cfg.get("use_streaming_ply", True)
+    checkpoint_version = da3_cfg.get("checkpoint_version", "auto")
+    use_streaming = da3_cfg.get("use_streaming", False)
+    da3_direct_gaussians = da3_cfg.get("da3_direct_gaussians", False)
+    oom_fallback = da3_cfg.get("oom_fallback", "reduce_resolution")
 
     summary = run_da3_unified(
         frames_dir=session["proc_dir"] / "frames_srgb",
@@ -411,6 +456,10 @@ def _run_da3_unified_stage(config: dict, session: dict) -> bool:
         dedup_threshold=dedup_threshold,
         conf_percentile=conf_percentile,
         use_streaming_ply=use_streaming_ply,
+        checkpoint_version=checkpoint_version,
+        use_streaming=use_streaming,
+        da3_direct_gaussians=da3_direct_gaussians,
+        oom_fallback=oom_fallback,
     )
 
     log.info("DA3 unified summary: %s", summary)
@@ -738,32 +787,42 @@ def stage_0_organize_inputs(config: dict, session: dict) -> bool:
         )
 
     # Step 7: Process 200MP photos into multi-resolution tiers
+    # NOTE: This is slow (~30s per DNG at 200MP). Skipped if outputs already exist.
     photos_200mp = manifest.get("photos", {}).get("main_200mp", [])
     if photos_200mp:
-        log.info("Stage 0: Processing %d 200MP photos into multi-resolution tiers...", len(photos_200mp))
-        from capture.multi_res_processor import process_200mp_photos
+        # Check if already processed — skip if outputs exist (saves minutes)
+        multi_res_output = session["proc_dir"] / "photos_200mp" / "quarter"
+        existing_quarter = list(multi_res_output.glob("*.png")) if multi_res_output.exists() else []
+        _skip_200mp = len(existing_quarter) >= len(photos_200mp)
 
-        # Collect DNG paths (prefer DNG over JPG for 200MP)
-        dng_paths = []
-        for p in photos_200mp:
-            dng = p.get("dng")
-            jpg = p.get("jpg")
-            if dng:
-                dng_paths.append(dng)
-            elif jpg:
-                dng_paths.append(jpg)
+        if _skip_200mp:
+            log.info("Stage 0: 200MP photos already processed (%d files), skipping", len(existing_quarter))
+            session["multi_res_200mp"] = {}
+        else:
+            log.info("Stage 0: Processing %d 200MP photos into multi-resolution tiers (this may take several minutes)...", len(photos_200mp))
+            from capture.multi_res_processor import process_200mp_photos
 
-        if dng_paths:
-            multi_res_dir = session["proc_dir"] / "photos" / "main_quarter"
-            fullres_dir = session["proc_dir"] / "photos" / "main_fullres"
-            face_crops_dir = session["proc_dir"] / "photos" / "main_face_crops"
+            # Collect DNG paths (prefer DNG over JPG for 200MP)
+            dng_paths = []
+            for p in photos_200mp:
+                dng = p.get("dng")
+                jpg = p.get("jpg")
+                if dng:
+                    dng_paths.append(dng)
+                elif jpg:
+                    dng_paths.append(jpg)
 
-            # Configure output tiers to use the professional directory structure
-            multi_res_results = process_200mp_photos(
-                photo_paths=dng_paths,
-                output_dir=session["proc_dir"] / "photos_200mp",
-            )
-            session["multi_res_200mp"] = multi_res_results
+            if dng_paths:
+                multi_res_dir = session["proc_dir"] / "photos" / "main_quarter"
+                fullres_dir = session["proc_dir"] / "photos" / "main_fullres"
+                face_crops_dir = session["proc_dir"] / "photos" / "main_face_crops"
+
+                # Configure output tiers to use the professional directory structure
+                multi_res_results = process_200mp_photos(
+                    photo_paths=dng_paths,
+                    output_dir=session["proc_dir"] / "photos_200mp",
+                )
+                session["multi_res_200mp"] = multi_res_results
 
             # Also create symlinks/copies in the professional structure
             for tier_name, tier_dir in [
@@ -848,7 +907,9 @@ def stage_1_extract_frames(config: dict, session: dict) -> bool:
                  "-of", "csv=p=0", str(video_path)],
                 capture_output=True, text=True, timeout=10,
             )
-            width = int(probe_out.stdout.strip().split("\n")[0]) if probe_out.stdout.strip() else 0
+            # ffprobe CSV output may have trailing comma (e.g., "7680,")
+            raw = probe_out.stdout.strip().split("\n")[0].strip().rstrip(",")
+            width = int(raw) if raw else 0
         except Exception:
             width = 0
 
@@ -857,12 +918,26 @@ def stage_1_extract_frames(config: dict, session: dict) -> bool:
             if not converted.exists():
                 log.info("Stage 1: Pre-converting %dx video to 1080p (one-time, speeds up extraction 10x)...", width)
                 try:
-                    _sp.run([
-                        "ffmpeg", "-y", "-hwaccel", "cuda",
+                    # Scale so longest dimension is 1920, preserve aspect ratio
+                    scale_filter = "scale=1920:-2" if width >= 1920 else "scale=-2:1920"
+                    # Try CUDA hwaccel first, fall back to CPU decode
+                    cmd_base = [
+                        "ffmpeg", "-y",
                         "-i", str(video_path),
                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
-                        "-s", "1920x1080", "-an", str(converted),
-                    ], capture_output=True, timeout=120, check=True)
+                        "-vf", scale_filter,
+                        "-an", str(converted),
+                    ]
+                    try:
+                        # Try with CUDA hardware decode (much faster for 8K HEVC)
+                        cmd_cuda = ["ffmpeg", "-y", "-hwaccel", "cuda",
+                                    "-i", str(video_path),
+                                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+                                    "-vf", scale_filter, "-an", str(converted)]
+                        _sp.run(cmd_cuda, capture_output=True, timeout=300, check=True)
+                    except Exception:
+                        log.info("Stage 1: CUDA hwaccel unavailable, using CPU decode")
+                        _sp.run(cmd_base, capture_output=True, timeout=600, check=True)
                     log.info("Stage 1: Converted to 1080p in %s", converted)
                 except Exception as e:
                     log.warning("Stage 1: 1080p conversion failed (%s), using original", e)
@@ -1863,6 +1938,7 @@ def stage_10_flame(config: dict, session: dict) -> bool:
             flame_model_path=flame_cfg["model_path"],
             embedding_path=flame_cfg["embedding_path"],
             output_dir=session["proc_dir"] / "flame",
+            fitting_config=flame_cfg.get("fitting"),
         )
         converged = result.get("converged", False)
         final_loss = result.get("loss", float("inf"))
@@ -2225,15 +2301,30 @@ def stage_14_export(config: dict, session: dict) -> bool:
     # Track which sub-steps succeeded
     substep_ok = {}
 
-    # ---- 1. Standard PLY export ----------------------------------------
+    # ---- 1. Gaussian export (multi-format via gsplat native API) --------
+    export_formats = export_cfg.get("formats", ["ply"])
+    # Separate Gaussian formats from mesh-only formats (gltf)
+    gaussian_formats = [f for f in export_formats if f in ("ply", "splat", "compressed")]
     try:
-        from splatting.exporter import export_gaussians_ply
+        from splatting.exporter import export_gsplat_native
 
-        export_gaussians_ply(gaussians, out_dir / "gaussians.ply")
-        substep_ok["ply"] = True
+        exported = export_gsplat_native(
+            gaussians, out_dir / "gaussians", formats=gaussian_formats,
+        )
+        substep_ok["ply"] = "ply" in exported
+        for fmt, path in exported.items():
+            log.info("Exported %s: %s", fmt, path)
     except Exception as e:
-        log.error("PLY export failed: %s", e, exc_info=True)
-        substep_ok["ply"] = False
+        log.error("Gaussian export failed: %s", e, exc_info=True)
+        # Fallback to legacy PLY writer
+        try:
+            from splatting.exporter import export_gaussians_ply
+
+            export_gaussians_ply(gaussians, out_dir / "gaussians.ply")
+            substep_ok["ply"] = True
+        except Exception as e2:
+            log.error("Legacy PLY export also failed: %s", e2, exc_info=True)
+            substep_ok["ply"] = False
 
     # ---- 2. Mesh extraction: SuGaR first, TSDF fallback ----------------
     mesh_path = out_dir / "mesh"
@@ -2322,15 +2413,89 @@ def stage_14_export(config: dict, session: dict) -> bool:
         log.warning("Texture baking failed: %s", e, exc_info=True)
         substep_ok["texture"] = False
 
-    # ---- 4. Compressed export -------------------------------------------
-    try:
-        from splatting.exporter import export_compressed
+    # ---- 4. Compressed export (PngCompression) ---------------------------
+    # Only run if "compressed" is in formats or always as a bonus step
+    if "compressed" in export_formats:
+        try:
+            from splatting.exporter import export_compressed
 
-        export_compressed(gaussians, out_dir / "gaussians_compressed")
-        substep_ok["compressed"] = True
-    except Exception as e:
-        log.warning("Compressed export failed: %s", e)
-        substep_ok["compressed"] = False
+            export_compressed(gaussians, out_dir / "gaussians_compressed")
+            substep_ok["compressed"] = True
+        except Exception as e:
+            log.warning("Compressed export failed: %s", e)
+            substep_ok["compressed"] = False
+    else:
+        try:
+            from splatting.exporter import export_compressed
+
+            export_compressed(gaussians, out_dir / "gaussians_compressed")
+            substep_ok["compressed"] = True
+        except Exception as e:
+            log.warning("Compressed export failed: %s", e)
+            substep_ok["compressed"] = False
+
+    # ---- 4b. glTF 2.0 export (mesh + texture) --------------------------
+    if "gltf" in export_formats:
+        try:
+            from splatting.exporter import export_to_gltf
+
+            mesh_obj = out_dir / "mesh.obj"
+            mesh_ply = out_dir / "mesh.ply"
+            mesh_for_gltf = mesh_obj if mesh_obj.exists() else (
+                mesh_ply if mesh_ply.exists() else None
+            )
+            texture_for_gltf = out_dir / "texture.png"
+            if not texture_for_gltf.exists():
+                texture_for_gltf = None
+
+            gltf_path = export_to_gltf(
+                mesh_path=mesh_for_gltf,
+                gaussians=gaussians,
+                output_path=out_dir / "model.glb",
+                texture_path=texture_for_gltf,
+            )
+            substep_ok["gltf"] = gltf_path is not None
+            if gltf_path:
+                log.info("Exported glTF to %s", gltf_path)
+        except Exception as e:
+            log.warning("glTF export failed: %s", e)
+            substep_ok["gltf"] = False
+
+    # ---- 4c. Draco / quantized compression --------------------------------
+    compression_cfg = export_cfg.get("compression", {})
+    if compression_cfg.get("enabled", True):
+        try:
+            from splatting.exporter import compress_exported_files
+
+            # Build exported dict from what we know succeeded
+            exported_files = {}
+            ply_path = out_dir / "gaussians.ply"
+            splat_path = out_dir / "gaussians.splat"
+            if ply_path.exists():
+                exported_files["ply"] = ply_path
+            if splat_path.exists():
+                exported_files["splat"] = splat_path
+
+            if exported_files:
+                comp_results = compress_exported_files(
+                    exported=exported_files,
+                    gaussians=gaussians,
+                    compression_config=compression_cfg,
+                )
+                substep_ok["draco_compression"] = bool(comp_results)
+                for fmt, stats in comp_results.items():
+                    log.info(
+                        "Compressed %s: %.1fx reduction (%s)",
+                        fmt,
+                        stats.get("ratio", 1.0),
+                        stats.get("backend_used", "unknown"),
+                    )
+            else:
+                log.info("No exported files to compress")
+                substep_ok["draco_compression"] = None
+        except Exception as e:
+            log.warning("Draco/quantized compression failed: %s", e)
+            substep_ok["draco_compression"] = False
 
     # ---- 5. Turntable renders -------------------------------------------
     try:
@@ -2844,6 +3009,8 @@ def main():
     log.info("Videos: %s", [str(v) for v in session["video_paths"]])
     log.info("Output: %s", session["out_dir"])
 
+    profiler = PipelineProfiler(session_id=session["session_id"])
+
     t0 = time.time()
     for stage_num, stage_name, stage_fn in STAGES:
         if stage_num < args.start_stage or stage_num > args.end_stage:
@@ -2858,23 +3025,45 @@ def main():
         log.info("Stage %d: %s", stage_num, stage_name)
         log.info("=" * 60)
 
+        profiler.start_stage(stage_name, stage_num=stage_num)
         stage_start = time.time()
+        stage_error = None
         try:
             success = stage_fn(config, session)
             if not success:
+                stage_error = "returned False"
                 log.error("Stage %d failed", stage_num)
+                profiler.end_stage(stage_name, error=stage_error)
                 sys.exit(1)
-        except Exception:
+        except Exception as exc:
+            stage_error = str(exc)
             log.exception("Stage %d (%s) failed with error", stage_num, stage_name)
+            profiler.end_stage(stage_name, error=stage_error)
+            profiler.summary()
             sys.exit(1)
 
         elapsed = time.time() - stage_start
+
+        # Free GPU memory after GPU-heavy stages to avoid VRAM pressure on next stage
+        # Stages 6 (DA3/COLMAP), 13 (training), 14 (export) are the main GPU consumers
+        if stage_num in (6, 13, 14):
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    import gc
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    log.debug("Freed GPU memory after stage %d", stage_num)
+            except ImportError:
+                pass
 
         # Validate stage outputs and collect metrics
         try:
             metrics = validate_stage_output(stage_num, config, session)
         except RuntimeError as e:
             log.error("Stage %d validation failed: %s", stage_num, e)
+            profiler.end_stage(stage_name, error=str(e))
+            profiler.summary()
             sys.exit(1)
 
         # Handle stage 3 retry with lower blur_threshold
@@ -2910,11 +3099,27 @@ def main():
         # Remove internal flags from metrics before logging
         metrics.pop("_retry_filter", None)
 
+        # Determine item count for throughput calculation
+        num_items = 0
+        for key in ("frames_extracted", "frames_selected", "depth_maps",
+                     "landmark_files", "initial_gaussians", "registered_images"):
+            if key in metrics and isinstance(metrics[key], int):
+                num_items = metrics[key]
+                break
+
+        profiler.end_stage(stage_name, num_items=num_items)
+
         log_metrics(session, stage_num, elapsed, metrics)
         log.info("Stage %d completed in %.1fs", stage_num, elapsed)
 
     total = time.time() - t0
     log.info("Pipeline complete in %.1fs", total)
+
+    # Print profiler summary table
+    profiler.summary()
+
+    # Save profiling JSON
+    profiler.save_json(session["out_dir"] / "pipeline_timing.json")
 
     # Print formatted summary
     print_pipeline_summary(session, total)

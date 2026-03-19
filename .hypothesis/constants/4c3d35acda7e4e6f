@@ -1,0 +1,4 @@
+# file: D:\Projects\3D\src\depth\depth_alignment.py
+# hypothesis_version: 6.151.9
+
+[-100.0, 0.0, 1e-08, 1e-06, 0.05, 0.1, 0.3, 0.5, 1.0, 2.0, 5.0, 10.0, 100.0, 100, 1000, '*.npy', 'Aligning depth maps', 'K', 'R', '_conf.npy', 'aligned', 'cameras.bin', 'colmap_pts', 'confidence', 'depth_path', 'error', 'ext_conf_path', 'images.bin', 'points3D.bin', 'scale', 'shift', 'stem', 't']

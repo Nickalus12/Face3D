@@ -53,7 +53,7 @@ export default function PipelineControl() {
       <div className="space-y-3">
         {/* Session Name */}
         <div>
-          <label className="block text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1">
+          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1">
             Session Name
           </label>
           <input
@@ -68,7 +68,7 @@ export default function PipelineControl() {
 
         {/* Content Directory */}
         <div>
-          <label className="block text-[11px] font-medium text-zinc-500 uppercase tracking-wider mb-1">
+          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1">
             Content Directory
           </label>
           <div className="flex gap-2">

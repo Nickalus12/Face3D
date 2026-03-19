@@ -10,13 +10,23 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import open3d as o3d
 import torch
 from plyfile import PlyData, PlyElement
 
+# Lazy open3d import — 2+ second import time, only needed for mesh I/O
+def _get_o3d():
+    import open3d as o3d
+    return o3d
+
 logger = logging.getLogger(__name__)
 
-# Number of spherical harmonic coefficients per color channel (degree 3 = 16)
+# Default SH degree for initialization.
+# NOTE: The trainer uses sh_degree_max=1 (4 coefficients) for faces.
+# We allocate only what's needed; the trainer will grow shN if needed.
+DEFAULT_SH_DEGREE = 1
+DEFAULT_SH_COEFFS = (DEFAULT_SH_DEGREE + 1) ** 2  # 4
+
+# Legacy constant kept for backward compatibility with saved models
 SH_DEGREE = 3
 SH_COEFFS = (SH_DEGREE + 1) ** 2  # 16
 
@@ -106,6 +116,9 @@ def _rgb_to_sh0(rgb: np.ndarray) -> np.ndarray:
 def _estimate_initial_scales(points: np.ndarray, k: int = 4) -> np.ndarray:
     """Estimate per-point scale from local point density using KNN.
 
+    Uses scipy's cKDTree for batch queries (100x faster than open3d's
+    per-point loop for 300K points).
+
     Args:
         points: (N, 3) point positions.
         k: Number of nearest neighbours (excluding self).
@@ -113,20 +126,16 @@ def _estimate_initial_scales(points: np.ndarray, k: int = 4) -> np.ndarray:
     Returns:
         (N, 3) log-scale values.
     """
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-    kdtree = o3d.geometry.KDTreeFlann(pcd)
+    from scipy.spatial import cKDTree
 
-    n = len(points)
-    scales = np.zeros(n, dtype=np.float32)
+    tree = cKDTree(points)
+    # Batch query: k+1 to include self, then discard self (index 0)
+    dists, _ = tree.query(points, k=k + 1, workers=-1)  # (N, k+1)
+    # dists[:, 0] is self (distance 0), take mean of k actual neighbors
+    mean_dists = np.mean(dists[:, 1:], axis=1).astype(np.float32)  # (N,)
+    mean_dists = np.maximum(mean_dists, 1e-7)
 
-    for i in range(n):
-        _, idx, dist2 = kdtree.search_knn_vector_3d(points[i], k + 1)
-        # Skip self (index 0), take mean distance to k neighbours
-        dists = np.sqrt(np.array(dist2[1:], dtype=np.float64))
-        scales[i] = max(dists.mean(), 1e-7)
-
-    log_scales = np.log(scales).astype(np.float32)
+    log_scales = np.log(mean_dists)
     return np.stack([log_scales, log_scales, log_scales], axis=-1)
 
 
@@ -147,6 +156,7 @@ def initialize_from_pointcloud(
         A GaussianModel with all parameters on CPU.
     """
     logger.info("Loading point cloud from %s", pointcloud_path)
+    o3d = _get_o3d()
     pcd = o3d.io.read_point_cloud(str(pointcloud_path))
     points = np.asarray(pcd.points, dtype=np.float32)
     n = len(points)
@@ -159,8 +169,10 @@ def initialize_from_pointcloud(
         logger.warning("Point cloud has no colors; defaulting to grey")
         colors = np.full((n, 3), 0.5, dtype=np.float32)
 
-    # SH coefficients: only DC term, rest zeros
-    sh = np.zeros((n, SH_COEFFS, 3), dtype=np.float32)
+    # SH coefficients: allocate only what the trainer needs (default SH1 = 4 coeffs)
+    # The trainer's _build_splats() splits into sh0 (1) + shN (rest).
+    # Allocating SH3 (16) wastes 43MB VRAM on zeros for 300K Gaussians.
+    sh = np.zeros((n, DEFAULT_SH_COEFFS, 3), dtype=np.float32)
     sh[:, 0, :] = _rgb_to_sh0(colors)
 
     # Scales from KNN density
@@ -210,6 +222,7 @@ def initialize_from_flame_mesh(
         A GaussianModel on CPU.
     """
     logger.info("Loading FLAME mesh from %s", mesh_path)
+    o3d = _get_o3d()
     mesh = o3d.io.read_triangle_mesh(str(mesh_path))
     mesh.compute_vertex_normals()
 
@@ -244,8 +257,8 @@ def initialize_from_flame_mesh(
         skin_rgb = np.array([0.76, 0.60, 0.50], dtype=np.float32)
         colors = np.tile(skin_rgb, (n, 1))
 
-    # SH DC term
-    sh = np.zeros((n, SH_COEFFS, 3), dtype=np.float32)
+    # SH DC term (allocate only DEFAULT_SH_COEFFS, not full SH3)
+    sh = np.zeros((n, DEFAULT_SH_COEFFS, 3), dtype=np.float32)
     sh[:, 0, :] = _rgb_to_sh0(colors)
 
     # Scales
@@ -669,8 +682,8 @@ def initialize_from_flame_binding(
     all_colors = np.concatenate([bound_colors, free_colors], axis=0).astype(np.float32)
     all_opacities = np.concatenate([bound_opacities, free_opacities], axis=0).astype(np.float32)
 
-    # SH coefficients: DC term from colors, rest zero
-    all_sh = np.zeros((total_n, SH_COEFFS, 3), dtype=np.float32)
+    # SH coefficients: DC term from colors, rest zero (DEFAULT_SH_COEFFS, not full SH3)
+    all_sh = np.zeros((total_n, DEFAULT_SH_COEFFS, 3), dtype=np.float32)
     all_sh[:, 0, :] = _rgb_to_sh0(all_colors)
 
     # Build GaussianModel
@@ -740,7 +753,7 @@ def initialize_from_colmap_sparse(
     # Normalize colors to [0,1]
     colors = colors.astype(np.float32) / 255.0
 
-    sh = np.zeros((n, SH_COEFFS, 3), dtype=np.float32)
+    sh = np.zeros((n, DEFAULT_SH_COEFFS, 3), dtype=np.float32)
     sh[:, 0, :] = _rgb_to_sh0(colors)
 
     scales = _estimate_initial_scales(points, k=min(4, max(1, n - 1)))
@@ -775,10 +788,10 @@ def _read_colmap_points3d_binary(path: Path) -> tuple[np.ndarray, np.ndarray]:
     with open(path, "rb") as f:
         num_points = struct.unpack("<Q", f.read(8))[0]
         for _ in range(num_points):
-            point3d_id = struct.unpack("<Q", f.read(8))[0]
+            struct.unpack("<Q", f.read(8))[0]
             xyz = struct.unpack("<ddd", f.read(24))
             rgb = struct.unpack("<BBB", f.read(3))
-            error = struct.unpack("<d", f.read(8))[0]
+            struct.unpack("<d", f.read(8))[0]
             track_length = struct.unpack("<Q", f.read(8))[0]
             # Skip track entries (image_id + point2d_idx per entry)
             f.read(track_length * 8)
@@ -827,8 +840,9 @@ def _save_gaussians_ply(model: GaussianModel, path: Path) -> None:
     opacities = model.opacities.detach().cpu().numpy()
 
     # Build structured array
-    # 3DGS PLY format: x y z nx ny nz f_dc_0..2 f_rest_0..44 opacity scale_0..2 rot_0..3
-    num_sh_rest = SH_COEFFS - 1  # 15
+    # 3DGS PLY format: x y z nx ny nz f_dc_0..2 f_rest_0..N opacity scale_0..2 rot_0..3
+    actual_sh_coeffs = sh.shape[1]  # May be 4 (SH1) or 16 (SH3)
+    num_sh_rest = actual_sh_coeffs - 1
     dtype_list = [
         ("x", "f4"), ("y", "f4"), ("z", "f4"),
         ("nx", "f4"), ("ny", "f4"), ("nz", "f4"),

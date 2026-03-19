@@ -21,6 +21,9 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from utils.numba_kernels import HAS_NUMBA
+from utils.timing import timed
+
 logger = logging.getLogger(__name__)
 
 # Guard mediapipe import - it may not be installed in all environments
@@ -260,6 +263,7 @@ def check_face_present(
     return False, None, None
 
 
+@timed
 def filter_frames(
     frames_dir: str | Path,
     output_json: str | Path,
@@ -482,7 +486,9 @@ def filter_frames(
     # Build summary
     reason_counts: dict[str, int] = {}
     for entry in report_frames:
-        for reason in entry["reasons"]:
+        if entry is None:
+            continue
+        for reason in (entry.get("reasons") or []):
             tag = reason.split("(")[0].strip().rstrip()
             reason_counts[tag] = reason_counts.get(tag, 0) + 1
 
@@ -521,6 +527,9 @@ def filter_frames(
 
 def _qvec_to_rotmat(qvec: np.ndarray) -> np.ndarray:
     """Convert COLMAP quaternion (w, x, y, z) to 3x3 rotation matrix."""
+    if HAS_NUMBA:
+        from utils.numba_kernels import quaternion_to_rotation_matrix
+        return quaternion_to_rotation_matrix(np.asarray(qvec, dtype=np.float64))
     w, x, y, z = qvec
     return np.array([
         [1 - 2*y*y - 2*z*z, 2*x*y - 2*w*z,     2*x*z + 2*w*y],

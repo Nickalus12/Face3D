@@ -9,14 +9,11 @@ Optimizations:
 import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
 from utils.colmap_io import (
-    Camera,
-    Image,
-    Point3D,
     get_intrinsics_matrix,
     qvec_to_rotmat,
     read_cameras_binary,

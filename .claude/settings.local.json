@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:help.autodesk.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.amazon.com)",
+      "WebFetch(domain:www.geapplianceparts.com)"
+    ]
+  },
+  "outputStyle": "default",
+  "spinnerTipsEnabled": false
+}

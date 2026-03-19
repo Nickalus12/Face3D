@@ -55,13 +55,17 @@ reconstruction:
   use_da3_unified: true  # When true, stage 6 uses DA3 to replace COLMAP+depth+alignment
   da3:
     process_res: 0  # 0 = auto-select (336 for face close-ups, 504 for wide views)
-    use_ray_pose: false  # Use ray-based pose estimation (alternative to camera decoder)
+    use_ray_pose: true  # Ray-based pose estimation (more accurate per ICLR 2026 paper)
     chunk_size: 16  # Frames per DA3 inference call (auto-halves on OOM, cached per session)
     conf_threshold: 0.0  # 0.0 = adaptive percentile-based threshold (keeps top 70%)
     conf_percentile: 30.0  # Percentile for adaptive threshold (lower = keep more points)
     deduplicate: true  # Skip near-duplicate adjacent frames (perceptual hash)
-    dedup_threshold: 5  # Hamming distance threshold for dedup (lower = more aggressive)
+    dedup_threshold: 8  # Hamming distance threshold for dedup (lower = more aggressive, 5 was too strict)
     use_streaming_ply: true  # Stream PLY writes to reduce peak memory
+    checkpoint_version: "auto"  # "auto" uses latest available, or specify "1.0", "1.1"
+    use_streaming: false  # Native DA3 sliding-window streaming (experimental, <12GB VRAM)
+    da3_direct_gaussians: false  # Experimental: direct 3DGS prediction from DA3 (skips stage 12)
+    oom_fallback: "reduce_resolution"  # OOM strategy: "anydepth", "reduce_resolution", "skip"
   colmap:
     binary: "D:/Projects/3D/COLMAP/COLMAP-3.9.1-windows-cuda/COLMAP.bat"
     camera_model: "OPENCV"
@@ -89,6 +93,11 @@ reconstruction:
       shape_reg_weight: 1.0e-4
       expression_reg_weight: 1.0e-4
       pose_reg_weight: 1.0e-3
+      # Joint optimization (GaussianSwap-inspired temporal consistency)
+      joint_optimization: true
+      joint_keyframes: 10
+      joint_iterations: 200
+      temporal_smoothness_weight: 0.1
   segmentation:
     model_type: "mediapipe"
 
@@ -105,10 +114,16 @@ splatting:
     checkpoint_interval: 1000
     eval_interval: 500
   export:
+    formats: ["ply", "splat"]  # Export formats: ply, splat, compressed, gltf
     mesh_voxel_size: 0.005
     turntable_views: 30  # Reduced from 60 for faster export
     texture_resolution: 2048  # Reduced from 4096 — faster baking
     render_resolution: [1920, 1080]
+    compression:
+      enabled: true                # Compress exported PLY/splat files
+      backend: "auto"              # "draco", "quantized", "auto" (tries draco first)
+      quality: "balanced"          # "fast", "balanced", "quality"
+      keep_uncompressed: true      # Keep original alongside compressed
 
 # Photo settings (Expert RAW / additional high-quality photos)
 photos:

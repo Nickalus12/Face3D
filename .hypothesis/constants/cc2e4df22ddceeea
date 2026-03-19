@@ -1,0 +1,4 @@
+# file: D:\Projects\3D\src\validation\contracts.py
+# hypothesis_version: 6.151.9
+
+[1e-06, 0.0001, 0.001, 0.01, 1.0, 10.0, 5023, '.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', 'No cameras in model', 'No images in model', '_quats', '_timestamps', '_xyz', 'timestamps']

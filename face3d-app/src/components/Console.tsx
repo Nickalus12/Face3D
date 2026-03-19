@@ -123,7 +123,7 @@ export const Console: React.FC = () => {
           <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
             System Console
           </span>
-          <span className="text-[10px] text-zinc-600">
+          <span className="text-[11px] text-zinc-600">
             {filteredLogs.length}/{logs.length}
           </span>
         </div>
@@ -135,7 +135,7 @@ export const Console: React.FC = () => {
               <button
                 key={f.value}
                 onClick={() => setFilter(f.value)}
-                className={`px-2 py-0.5 text-[10px] rounded-md transition-all duration-150 ${
+                className={`px-2 py-0.5 text-[11px] rounded-md transition-all duration-150 ${
                   filter === f.value
                     ? 'bg-zinc-800 text-zinc-200 shadow-sm'
                     : `text-zinc-600 hover:text-zinc-400 hover:bg-white/[0.03] ${f.color}`
@@ -148,13 +148,13 @@ export const Console: React.FC = () => {
 
           {/* Search */}
           <div className="relative">
-            <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500" />
+            <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" />
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search logs..."
-              className="bg-zinc-900/80 border border-zinc-800 rounded-md pl-8 pr-3 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/30 w-40 transition-all"
+              className="bg-zinc-800/50 border border-zinc-700/50 rounded-md pl-8 pr-3 py-1 text-xs text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 focus:border-indigo-500/30 w-40 transition-all"
             />
           </div>
 
@@ -223,7 +223,7 @@ export const Console: React.FC = () => {
                 <div key={index} className="w-full my-2">
                   <div className="h-px w-full bg-gradient-to-r from-transparent via-emerald-500/30 to-transparent" />
                   <div className="bg-emerald-500/[0.06] py-1.5 px-4 flex items-center">
-                    <span className="text-emerald-400 font-bold uppercase tracking-widest text-[10px]">
+                    <span className="text-emerald-400 font-bold uppercase tracking-widest text-[11px]">
                       {log.message}
                     </span>
                   </div>
@@ -244,7 +244,7 @@ export const Console: React.FC = () => {
                   {index + 1}
                 </div>
                 {/* Timestamp — HH:MM:SS format */}
-                <div className="w-16 text-zinc-600 shrink-0 select-none opacity-60 text-[10px]">
+                <div className="w-16 text-zinc-600 shrink-0 select-none opacity-60 text-[11px]">
                   {shortTimestamp}
                 </div>
                 {/* Level badge */}
@@ -305,7 +305,7 @@ export const Console: React.FC = () => {
             </div>
             <div className="relative text-center">
               <div className="text-emerald-400 font-bold text-sm tracking-wide">Pipeline Complete</div>
-              <div className="text-zinc-500 text-[10px] mt-1">All 14 stages finished successfully</div>
+              <div className="text-zinc-500 text-[11px] mt-1">All 14 stages finished successfully</div>
             </div>
           </div>
         )}

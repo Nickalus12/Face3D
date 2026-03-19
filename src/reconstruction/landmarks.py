@@ -10,17 +10,30 @@ from pathlib import Path
 from typing import Optional
 
 import cv2
-import mediapipe as mp
 import numpy as np
 from tqdm import tqdm
 
+from utils.timing import timed
+
 logger = logging.getLogger(__name__)
 
-# Handle MediaPipe API changes across versions
-if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
-    _face_mesh_module = mp.solutions.face_mesh
-else:
-    from mediapipe.python.solutions import face_mesh as _face_mesh_module
+# MediaPipe is lazy-loaded to avoid ~1.5s import overhead when this module
+# is imported but landmarks aren't needed (e.g. pipeline startup, tests).
+_face_mesh_module = None
+
+
+def _get_face_mesh_module():
+    """Lazy-load MediaPipe face mesh module on first use."""
+    global _face_mesh_module
+    if _face_mesh_module is None:
+        import mediapipe as mp
+        if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh"):
+            _face_mesh_module = mp.solutions.face_mesh
+        else:
+            from mediapipe.python.solutions import face_mesh as _fm
+            _face_mesh_module = _fm
+        logger.debug("MediaPipe face mesh module loaded")
+    return _face_mesh_module
 
 
 def _compute_landmark_quality(
@@ -80,7 +93,7 @@ class FaceLandmarkDetector:
         """
         self._max_faces = max_faces
         self._min_detection_confidence = min_detection_confidence
-        self._face_mesh = _face_mesh_module.FaceMesh(
+        self._face_mesh = _get_face_mesh_module().FaceMesh(
             static_image_mode=True,
             max_num_faces=max_faces,
             refine_landmarks=True,
@@ -163,6 +176,7 @@ class FaceLandmarkDetector:
             "quality_score": float(quality_score),
         }
 
+    @timed
     def detect_batch(
         self,
         frames_dir: Path,
@@ -203,9 +217,29 @@ class FaceLandmarkDetector:
             logger.warning("No images found in %s", frames_dir)
             return []
 
-        logger.info("Detecting landmarks for %d images ...", len(image_paths))
+        # --- Skip images that already have landmark files ---
+        pending_indices: list[int] = []
+        output_paths: list[Path] = []
+        for i, img_path in enumerate(image_paths):
+            out_path = output_dir / (img_path.stem + ".json")
+            output_paths.append(out_path)
+            if not out_path.exists():
+                pending_indices.append(i)
 
-        # --- Pre-load images in parallel (I/O-bound) ---
+        if not pending_indices:
+            logger.info("All %d landmark files already exist, skipping", len(image_paths))
+            return output_paths
+
+        skipped = len(image_paths) - len(pending_indices)
+        if skipped > 0:
+            logger.info(
+                "Detecting landmarks for %d images (%d already processed, skipped) ...",
+                len(pending_indices), skipped,
+            )
+        else:
+            logger.info("Detecting landmarks for %d images ...", len(image_paths))
+
+        # --- Pre-load only pending images in parallel (I/O-bound) ---
         if max_workers is None:
             max_workers = get_optimal_workers("io")
 
@@ -215,23 +249,24 @@ class FaceLandmarkDetector:
             idx, path = idx_path
             return idx, cv2.imread(str(path))
 
+        pending_paths = [(i, image_paths[i]) for i in pending_indices]
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
                 pool.submit(_read_image, (i, p)): i
-                for i, p in enumerate(image_paths)
+                for i, p in pending_paths
             }
             for fut in as_completed(futures):
                 idx, img = fut.result()
                 loaded_images[idx] = img
 
-        # --- Sequential MediaPipe detection ---
-        output_paths: list[Path] = []
+        # --- Sequential MediaPipe detection (only pending frames) ---
         detected_count = 0
         failed_count = 0
 
-        for i, img_path in enumerate(tqdm(image_paths, desc="Landmarks")):
+        for i in tqdm(pending_indices, desc="Landmarks"):
+            img_path = image_paths[i]
             image = loaded_images.get(i)
-            out_path = output_dir / (img_path.stem + ".json")
+            out_path = output_paths[i]
 
             if image is None:
                 logger.warning("Could not read image: %s", img_path)
@@ -266,14 +301,13 @@ class FaceLandmarkDetector:
 
             with open(out_path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh)
-            output_paths.append(out_path)
 
         # Free loaded images
         loaded_images.clear()
 
         logger.info(
-            "Saved %d landmark files to %s (%d detected, %d failed)",
-            len(output_paths), output_dir, detected_count, failed_count,
+            "Saved %d landmark files to %s (%d detected, %d failed, %d skipped)",
+            len(output_paths), output_dir, detected_count, failed_count, skipped,
         )
         return output_paths
 

@@ -77,7 +77,7 @@ export default function StatusBar() {
   );
 
   return (
-    <div className="h-[22px] gradient-border-top bg-[#0a0a0b] flex items-center px-3 justify-between text-[10px] font-mono tracking-wide text-zinc-500 shrink-0 z-50 select-none">
+    <div className="h-[30px] gradient-border-top bg-[#08080a] flex items-center px-3 justify-between text-xs font-mono tracking-wide text-zinc-500 shrink-0 z-50 select-none">
       {/* Left side metrics */}
       <div className="flex items-center gap-2.5">
         {/* Pipeline Status */}

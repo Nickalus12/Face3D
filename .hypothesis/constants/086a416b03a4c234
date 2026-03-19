@@ -1,0 +1,4 @@
+# file: D:\Projects\3D\src\sensors\imu_parser.py
+# hypothesis_version: 6.151.9
+
+[0.0, 9.80665, 180.0, 1000.0, '#', '-codec', '-f', '-i', '-map', '-print_format', '-show_format', '-show_streams', '-v', '.csv', '.json', '<f4', '<i2', 'accel', 'accel_x', 'accel_xyz', 'accelerometer_x', 'ax', 'codec_tag_string', 'codec_type', 'copy', 'data', 'duration', 'ffmpeg', 'ffprobe', 'format', 'gpmd', 'gx', 'gyro', 'gyro_x', 'gyro_xyz', 'gyroscope_x', 'handler_name', 'imu', 'index', 'json', 'meta', 'mett', 'motion', 'pipe:1', 'quiet', 'r', 'rawvideo', 'samples', 'sensor', 'streams', 'subtitle', 't', 'tags', 'time', 'timestamp', 'timestamps', 'ts', 'unknown', 'utf-8', 'video', 'x', 'y', 'z']

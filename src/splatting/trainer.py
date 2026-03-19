@@ -5,7 +5,7 @@ with face-optimized losses including normal consistency, distortion
 regularization, LPIPS perceptual loss, depth supervision, and opacity entropy.
 
 Optimizations (research-backed):
-    - packed=False: 25-30% faster per iteration
+    - packed=False: 25-30% faster per iteration (packed=True saves up to 4x memory)
     - sh_degree_max=1: 15-25% faster for face scenes with controlled lighting
     - radius_clip/near_plane/far_plane: skip out-of-range Gaussians
     - cudnn.benchmark: faster conv operations (SSIM etc.)
@@ -37,6 +37,7 @@ from tqdm import tqdm
 
 from splatting.camera_utils import Camera
 from splatting.initializer import GaussianModel
+from utils.timing import timed
 
 logger = logging.getLogger(__name__)
 
@@ -276,11 +277,20 @@ class TrainingConfig:
     sh_degree_max: int = 1
     sh_increase_every: int = 1_000  # increase active SH degree every N iters
 
+    # torch.compile: JIT-compile the training step for 30-50% speedup on Ampere+ GPUs.
+    # Falls back gracefully if compilation fails (some custom CUDA ops may not support it).
+    use_torch_compile: bool = False  # Disabled: gsplat custom CUDA ops break torch.compile on Windows
+    compile_mode: str = "reduce-overhead"  # "reduce-overhead" or "max-autotune"
+
     # Mixed precision (disabled by default: gsplat strategies conflict with GradScaler)
     use_amp: bool = False
 
     # Memory-efficient rasterisation flags
-    # packed=False is 25-30% faster per iteration
+    # packed=False is 25-30% faster per iteration (gsplat docs confirm this).
+    # packed=True uses up to 4x less memory but is slower — use for large
+    # scenes (>500K Gaussians) or GPUs with <12GB VRAM.
+    # gsplat 1.4+ achieves up to 4x memory reduction vs reference 3DGS
+    # implementations overall through fused kernels and sparse gradients.
     packed: bool = False
     sparse_grad: bool = False  # Disabled: conflicts with quat normalization in autograd
 
@@ -297,25 +307,44 @@ class TrainingConfig:
     background_color: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
 
 
-def _build_splats(gaussians: GaussianModel, device: torch.device) -> torch.nn.ParameterDict:
+def _build_splats(
+    gaussians: GaussianModel, device: torch.device, sh_degree_max: int = 1
+) -> torch.nn.ParameterDict:
     """Convert a GaussianModel into the ParameterDict expected by gsplat strategies.
 
     Keys: 'means', 'scales', 'quats', 'opacities', 'sh0', 'shN'
+
+    If the model was initialized with fewer SH coefficients than needed
+    (e.g., SH1=4 coeffs but sh_degree_max=3 needs 16), pads with zeros.
+    This avoids wasting VRAM at init time while preserving flexibility.
     """
     gaussians = gaussians.to(device)
 
-    # Split SH into DC (sh0) and higher-order (shN)
-    sh_all = gaussians.colors_sh  # (N, SH_COEFFS, 3)
-    sh0 = sh_all[:, :1, :]       # (N, 1, 3)
-    shN = sh_all[:, 1:, :]       # (N, SH_COEFFS-1, 3)
+    target_sh_coeffs = (sh_degree_max + 1) ** 2  # SH1=4, SH2=9, SH3=16
+    sh_all = gaussians.colors_sh  # (N, C, 3) where C may be 4 or 16
+    current_coeffs = sh_all.shape[1]
+
+    if current_coeffs < target_sh_coeffs:
+        # Pad with zeros — only the DC term has data, rest learns during training
+        pad = torch.zeros(
+            sh_all.shape[0], target_sh_coeffs - current_coeffs, 3,
+            device=sh_all.device, dtype=sh_all.dtype,
+        )
+        sh_all = torch.cat([sh_all, pad], dim=1)
+    elif current_coeffs > target_sh_coeffs:
+        # Truncate (e.g., loaded SH3 model but training with SH1)
+        sh_all = sh_all[:, :target_sh_coeffs, :]
+
+    sh0 = sh_all[:, :1, :]  # (N, 1, 3)
+    shN = sh_all[:, 1:, :]  # (N, target_sh_coeffs-1, 3)
 
     splats = torch.nn.ParameterDict({
         "means": torch.nn.Parameter(gaussians.positions.clone()),
-        "scales": torch.nn.Parameter(gaussians.scales.clone()),          # log-space
+        "scales": torch.nn.Parameter(gaussians.scales.clone()),
         "quats": torch.nn.Parameter(gaussians.rotations.clone()),
-        "opacities": torch.nn.Parameter(gaussians.opacities.squeeze(-1).clone()),  # (N,) logit-space
-        "sh0": torch.nn.Parameter(sh0.clone()),                         # (N, 1, 3)
-        "shN": torch.nn.Parameter(shN.clone()),                         # (N, 15, 3)
+        "opacities": torch.nn.Parameter(gaussians.opacities.squeeze(-1).clone()),
+        "sh0": torch.nn.Parameter(sh0.clone()),
+        "shN": torch.nn.Parameter(shN.clone()),
     })
     return splats
 
@@ -459,6 +488,7 @@ class GaussianTrainer:
     # Public API
     # ------------------------------------------------------------------
 
+    @timed
     def train(
         self,
         gaussians: GaussianModel,
@@ -469,6 +499,8 @@ class GaussianTrainer:
         output_dir: Path | None = None,
         photo_names: set[str] | None = None,
         photo_weight: float = 3.0,
+        per_image_weights: dict[str, float] | None = None,
+        lighting_weights: dict[str, float] | None = None,
     ) -> GaussianModel | dict:
         """Run the full Gaussian Splatting training loop.
 
@@ -494,6 +526,8 @@ class GaussianTrainer:
         # --- Enable cuDNN benchmark for faster conv operations (SSIM etc.) ---
         if torch.cuda.is_available():
             torch.backends.cudnn.benchmark = True
+            # TF32 matmul on Ampere+ GPUs: ~2x throughput for float32 matrix ops
+            torch.set_float32_matmul_precision('high')
 
         # --- Validate inputs ---
         validation_error = self._validate_inputs(gaussians, cameras, images_dir)
@@ -521,7 +555,7 @@ class GaussianTrainer:
                 lpips_disabled_by_fallback = True
 
         # --- Build ParameterDict from GaussianModel ---
-        splats = _build_splats(gaussians, self.device)
+        splats = _build_splats(gaussians, self.device, sh_degree_max=cfg.sh_degree_max)
         num_gaussians_start = splats["means"].shape[0]
 
         # --- Estimate scene scale (used by strategies) ---
@@ -597,6 +631,34 @@ class GaussianTrainer:
             _using_selective_adam,
         )
 
+        # --- torch.compile setup ---
+        _use_compiled = False
+        _compiled_step_2dgs = self._training_step_2dgs
+        _compiled_step_3dgs = self._training_step_3dgs
+        if cfg.use_torch_compile and hasattr(torch, 'compile'):
+            try:
+                _compiled_step_2dgs = torch.compile(
+                    self._training_step_2dgs,
+                    mode=cfg.compile_mode,
+                    fullgraph=False,  # gsplat custom CUDA ops may break full graph
+                )
+                _compiled_step_3dgs = torch.compile(
+                    self._training_step_3dgs,
+                    mode=cfg.compile_mode,
+                    fullgraph=False,
+                )
+                _use_compiled = True
+                logger.info(
+                    "torch.compile enabled (mode=%s). First iteration will be slower due to compilation.",
+                    cfg.compile_mode,
+                )
+            except Exception as e:
+                logger.warning(
+                    "torch.compile setup failed, falling back to eager mode: %s", e,
+                )
+                _compiled_step_2dgs = self._training_step_2dgs
+                _compiled_step_3dgs = self._training_step_3dgs
+
         # Active SH degree (start at 0, increase over time)
         active_sh_degree = 0
 
@@ -635,6 +697,7 @@ class GaussianTrainer:
             torch.cuda.reset_peak_memory_stats(self.device)
 
         pbar = tqdm(range(1, cfg.iterations + 1), desc="Training Gaussians")
+        _train_start = time.time()
 
         for iteration in pbar:
             # --- Save last-good state every 500 iterations ---
@@ -717,49 +780,91 @@ class GaussianTrainer:
             while True:
                 try:
                     with ctx:
+                        _use_appearance = appearance_mlp is not None and appearance_embeddings is not None
                         if use_2dgs:
-                            rgb, alpha, normals, surf_normals, distort, median_depth, info = self._render_2dgs(
-                                splats, viewmat, K_train, w_train, h_train, active_sh_degree, bg,
-                            )
-
-                            # Apply appearance correction
-                            if appearance_mlp is not None and appearance_embeddings is not None:
+                            if _use_appearance:
+                                # Appearance embedding: run eagerly (MLP adds overhead that
+                                # doesn't benefit from compile, and nn.Embedding can cause graph breaks)
+                                rgb, alpha, normals, surf_normals, distort, median_depth, info = self._render_2dgs(
+                                    splats, viewmat, K_train, w_train, h_train, active_sh_degree, bg,
+                                )
                                 emb = appearance_embeddings(
                                     torch.tensor(cam_idx, device=self.device)
                                 )
                                 rgb = appearance_mlp(rgb, emb)
-
-                            loss, loss_dict = self._compute_loss_2dgs(
-                                rgb, gt_image_train,
-                                normals=normals,
-                                surf_normals=surf_normals,
-                                distort=distort,
-                                median_depth=median_depth,
-                                depth_gt=gt_depth_train,
-                                mask=mask_train,
-                                opacities=torch.sigmoid(splats["opacities"]),
-                                lpips_disabled=lpips_disabled_by_fallback,
-                                iteration=iteration,
-                            )
+                                loss, loss_dict = self._compute_loss_2dgs(
+                                    rgb, gt_image_train,
+                                    normals=normals, surf_normals=surf_normals,
+                                    distort=distort, median_depth=median_depth,
+                                    depth_gt=gt_depth_train, mask=mask_train,
+                                    opacities=torch.sigmoid(splats["opacities"]),
+                                    lpips_disabled=lpips_disabled_by_fallback,
+                                    iteration=iteration,
+                                )
+                            else:
+                                try:
+                                    loss, loss_dict, info, rgb = _compiled_step_2dgs(
+                                        splats, viewmat, K_train, w_train, h_train,
+                                        active_sh_degree, bg, gt_image_train,
+                                        gt_depth_train, mask_train,
+                                        torch.sigmoid(splats["opacities"]),
+                                        lpips_disabled_by_fallback, iteration,
+                                    )
+                                except Exception as _compile_err:
+                                    if _use_compiled and _compiled_step_2dgs is not self._training_step_2dgs:
+                                        logger.warning(
+                                            "torch.compile failed at runtime, falling back to eager: %s",
+                                            _compile_err,
+                                        )
+                                        _compiled_step_2dgs = self._training_step_2dgs
+                                        _compiled_step_3dgs = self._training_step_3dgs
+                                        loss, loss_dict, info, rgb = _compiled_step_2dgs(
+                                            splats, viewmat, K_train, w_train, h_train,
+                                            active_sh_degree, bg, gt_image_train,
+                                            gt_depth_train, mask_train,
+                                            torch.sigmoid(splats["opacities"]),
+                                            lpips_disabled_by_fallback, iteration,
+                                        )
+                                    else:
+                                        raise
                         else:
-                            rgb, depth, alpha, info = self._render(
-                                splats, viewmat, K_train, w_train, h_train, active_sh_degree, bg,
-                                render_depth=render_depth,
-                            )
-
-                            # Apply appearance correction
-                            if appearance_mlp is not None and appearance_embeddings is not None:
+                            if _use_appearance:
+                                rgb, depth, alpha, info = self._render(
+                                    splats, viewmat, K_train, w_train, h_train, active_sh_degree, bg,
+                                    render_depth=render_depth,
+                                )
                                 emb = appearance_embeddings(
                                     torch.tensor(cam_idx, device=self.device)
                                 )
                                 rgb = appearance_mlp(rgb, emb)
-
-                            loss, loss_dict = self._compute_loss(
-                                rgb, gt_image_train,
-                                depth_rendered=depth,
-                                depth_gt=gt_depth_train,
-                                mask=mask_train,
-                            )
+                                loss, loss_dict = self._compute_loss(
+                                    rgb, gt_image_train,
+                                    depth_rendered=depth,
+                                    depth_gt=gt_depth_train,
+                                    mask=mask_train,
+                                )
+                            else:
+                                try:
+                                    loss, loss_dict, info, rgb = _compiled_step_3dgs(
+                                        splats, viewmat, K_train, w_train, h_train,
+                                        active_sh_degree, bg, gt_image_train,
+                                        gt_depth_train, mask_train, render_depth,
+                                    )
+                                except Exception as _compile_err:
+                                    if _use_compiled and _compiled_step_3dgs is not self._training_step_3dgs:
+                                        logger.warning(
+                                            "torch.compile failed at runtime, falling back to eager: %s",
+                                            _compile_err,
+                                        )
+                                        _compiled_step_2dgs = self._training_step_2dgs
+                                        _compiled_step_3dgs = self._training_step_3dgs
+                                        loss, loss_dict, info, rgb = _compiled_step_3dgs(
+                                            splats, viewmat, K_train, w_train, h_train,
+                                            active_sh_degree, bg, gt_image_train,
+                                            gt_depth_train, mask_train, render_depth,
+                                        )
+                                    else:
+                                        raise
                     # Rasterization succeeded, break out of retry loop
                     break
 
@@ -977,10 +1082,22 @@ class GaussianTrainer:
                 loss_strs = " | ".join(
                     f"{k}: {v.item():.4f}" for k, v in loss_dict.items()
                 )
+                # GPU memory tracking
+                gpu_mem_gb = torch.cuda.memory_allocated(self.device) / (1024**3) if torch.cuda.is_available() else 0
+                gpu_peak_gb = torch.cuda.max_memory_allocated(self.device) / (1024**3) if torch.cuda.is_available() else 0
+                elapsed_s = time.time() - _train_start if '_train_start' in dir() else 0
+                its_per_sec = iteration / elapsed_s if elapsed_s > 0 else 0
+                eta_s = (cfg.iterations - iteration) / its_per_sec if its_per_sec > 0 else 0
+
                 logger.info(
-                    "Iter %d | Loss %.4f | PSNR %.2f | Best %.2f | Gaussians %d | %s",
-                    iteration, final_loss, psnr_val, best_psnr, n_gs, loss_strs,
+                    "Iter %d/%d | Loss %.4f | PSNR %.2f (best %.2f) | GS %d | GPU %.1f/%.1fGB | %.1f it/s | ETA %ds | %s",
+                    iteration, cfg.iterations, final_loss, psnr_val, best_psnr,
+                    n_gs, gpu_mem_gb, gpu_peak_gb, its_per_sec, int(eta_s), loss_strs,
                 )
+
+            # Early divergence detection
+            if final_loss > 10.0 and iteration > 100:
+                logger.warning("Loss is very high (%.2f) at iteration %d — possible divergence", final_loss, iteration)
 
             # --- VRAM safety: enforce Gaussian cap ---
             # MCMC strategy enforces cap_max internally — skip manual pruning
@@ -1061,6 +1178,7 @@ class GaussianTrainer:
             "nan_count": nan_count,
             "oom_count": oom_count,
             "gradient_clips": gradient_clips,
+            "torch_compile": _use_compiled and (_compiled_step_2dgs is not self._training_step_2dgs),
         }
         logger.info("Training summary: %s", summary)
 
@@ -1068,6 +1186,70 @@ class GaussianTrainer:
         result_model = _splats_to_gaussians(splats)
         result_model._training_summary = summary
         return result_model
+
+    # ------------------------------------------------------------------
+    # Compilable training step functions
+    # ------------------------------------------------------------------
+
+    def _training_step_2dgs(
+        self,
+        splats: torch.nn.ParameterDict,
+        viewmat: torch.Tensor,
+        K: torch.Tensor,
+        w: int,
+        h: int,
+        sh_degree: int,
+        bg: torch.Tensor,
+        gt_image: torch.Tensor,
+        gt_depth: torch.Tensor | None,
+        mask: torch.Tensor | None,
+        opacities_sigmoid: torch.Tensor,
+        lpips_disabled: bool,
+        iteration: int,
+    ) -> tuple[torch.Tensor, dict, dict]:
+        """Compilable 2DGS forward pass: render + loss. Returns (loss, loss_dict, info)."""
+        rgb, alpha, normals, surf_normals, distort, median_depth, info = self._render_2dgs(
+            splats, viewmat, K, w, h, sh_degree, bg,
+        )
+        loss, loss_dict = self._compute_loss_2dgs(
+            rgb, gt_image,
+            normals=normals,
+            surf_normals=surf_normals,
+            distort=distort,
+            median_depth=median_depth,
+            depth_gt=gt_depth,
+            mask=mask,
+            opacities=opacities_sigmoid,
+            lpips_disabled=lpips_disabled,
+            iteration=iteration,
+        )
+        return loss, loss_dict, info, rgb
+
+    def _training_step_3dgs(
+        self,
+        splats: torch.nn.ParameterDict,
+        viewmat: torch.Tensor,
+        K: torch.Tensor,
+        w: int,
+        h: int,
+        sh_degree: int,
+        bg: torch.Tensor,
+        gt_image: torch.Tensor,
+        gt_depth: torch.Tensor | None,
+        mask: torch.Tensor | None,
+        render_depth: bool,
+    ) -> tuple[torch.Tensor, dict, dict, torch.Tensor]:
+        """Compilable 3DGS forward pass: render + loss. Returns (loss, loss_dict, info, rgb)."""
+        rgb, depth, alpha, info = self._render(
+            splats, viewmat, K, w, h, sh_degree, bg, render_depth=render_depth,
+        )
+        loss, loss_dict = self._compute_loss(
+            rgb, gt_image,
+            depth_rendered=depth,
+            depth_gt=gt_depth,
+            mask=mask,
+        )
+        return loss, loss_dict, info, rgb
 
     # ------------------------------------------------------------------
     # Strategy creation

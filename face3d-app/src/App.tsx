@@ -11,6 +11,7 @@ import KeyboardShortcuts from './components/KeyboardShortcuts';
 import TopBar from './components/TopBar';
 import WelcomeScreen from './components/WelcomeScreen';
 import { TrainingMetrics } from './components/TrainingMetrics';
+import PipelineView from './components/PipelineView';
 import {
   ChevronRight,
   ChevronLeft,
@@ -41,7 +42,7 @@ export default function App() {
   const consoleRef = useRef<HTMLDivElement>(null);
   const isResizingRef = useRef(false);
 
-  const { fetchSessions, currentSession, selectSession } = useSessionStore();
+  const { fetchSessions, currentSession, selectSession, clearSession } = useSessionStore();
   const {
     status,
     logs,
@@ -70,6 +71,13 @@ export default function App() {
     init();
   }, [fetchSessions, fetchGpuInfo]);
 
+  // ── Auto-switch to pipeline view when running ──────────────
+  useEffect(() => {
+    if (isRunning && activeView !== 'pipeline') {
+      handleViewChange('pipeline');
+    }
+  }, [isRunning]);
+
   // ── Poll GPU info while pipeline is running ─────────────────
   useEffect(() => {
     if (!isRunning) return;
@@ -88,7 +96,11 @@ export default function App() {
 
   // ── View change with crossfade transition ───────────────────
   const handleViewChange = useCallback((view: ViewId) => {
-    if (view === activeView) return;
+    if (view === activeView && view !== 'home') return;
+    // Clicking "Sessions" / "home" should deselect current session → show welcome
+    if (view === 'home') {
+      clearSession();
+    }
     setIsTransitioning(true);
     setPrevView(activeView);
     setTimeout(() => {
@@ -98,7 +110,7 @@ export default function App() {
         setPrevView(null);
       }, 150);
     }, 10);
-  }, [activeView]);
+  }, [activeView, clearSession]);
 
   const handleToggleConsole = useCallback(() => {
     setIsConsoleOpen((prev) => !prev);
@@ -149,7 +161,7 @@ export default function App() {
   const showWelcome = !currentSession && !isLoading;
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-[#0a0a0b] text-zinc-300 font-sans overflow-hidden selection:bg-indigo-500/30 noise-overlay">
+    <div className="flex flex-col h-screen w-screen bg-surface text-zinc-300 font-sans overflow-hidden selection:bg-indigo-500/30 noise-overlay">
       {/* Keyboard shortcuts listener */}
       <KeyboardShortcuts
         onViewChange={handleViewChange}
@@ -165,11 +177,11 @@ export default function App() {
       />
 
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar activeView={activeView} onViewChange={handleViewChange} />
+        <Sidebar activeView={activeView} onViewChange={handleViewChange} onNewScan={handleNewScan} />
 
         {/* Collapsible Detail Panel with draggable resize */}
         <div
-          className={`relative bg-[#0e0e11] border-r border-zinc-800/40 flex flex-col z-20 shrink-0 transition-opacity duration-200 ease-out ${
+          className={`relative bg-surface-raised border-r border-border flex flex-col z-20 shrink-0 transition-opacity duration-200 ease-out ${
             isPanelOpen ? 'opacity-100' : 'w-0 opacity-0 overflow-hidden'
           }`}
           style={isPanelOpen ? { width: `${panelWidth}px` } : undefined}
@@ -177,7 +189,7 @@ export default function App() {
           <DetailPanel isExpanded={isPanelOpen} onToggle={() => setIsPanelOpen(!isPanelOpen)} />
 
           {/* Master Control */}
-          <div className="p-4 border-t border-zinc-800/40 bg-zinc-900/20 shrink-0">
+          <div className="p-3 border-t border-border bg-zinc-900/20 shrink-0">
             <button
               onClick={() => {
                 if (isRunning) {
@@ -185,13 +197,13 @@ export default function App() {
                 }
               }}
               disabled={!isRunning}
-              className={`w-full py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-all duration-200 shadow-lg active:scale-[0.98] ${
+              className={`w-full py-2.5 rounded-button text-xs font-semibold flex items-center justify-center gap-2 transition-all duration-200 active:scale-[0.98] ${
                 isRunning
-                  ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 shadow-red-500/5'
-                  : 'bg-zinc-800 text-zinc-500 border border-zinc-700/50 cursor-not-allowed'
+                  ? 'bg-red-500/10 text-red-400 hover:bg-red-500/15 border border-red-500/20 shadow-lg shadow-red-500/5'
+                  : 'bg-zinc-800/60 text-zinc-500 border border-zinc-700/40 cursor-not-allowed'
               }`}
             >
-              {isRunning ? <Pause size={16} /> : <Play size={16} fill="currentColor" />}
+              {isRunning ? <Pause size={14} /> : <Play size={14} fill="currentColor" />}
               {isRunning ? 'Stop Pipeline' : 'Idle'}
             </button>
           </div>
@@ -210,14 +222,16 @@ export default function App() {
         {/* Panel toggle — lives between panel and content, never overlaps either */}
         <button
           onClick={() => setIsPanelOpen(!isPanelOpen)}
-          className="w-5 h-full shrink-0 flex items-center justify-center bg-[#0c0c0e] hover:bg-zinc-800/80 border-r border-zinc-800/30 text-zinc-600 hover:text-zinc-300 transition-all duration-150 cursor-pointer"
-          title={isPanelOpen ? 'Collapse panel' : 'Expand panel'}
+          className="w-4 h-full shrink-0 flex items-center justify-center bg-surface hover:bg-zinc-800/60 border-r border-border text-zinc-700 hover:text-zinc-300 transition-all duration-200 cursor-pointer group"
+          title={isPanelOpen ? 'Collapse panel (Ctrl+B)' : 'Expand panel (Ctrl+B)'}
         >
-          {isPanelOpen ? <ChevronLeft size={12} /> : <ChevronRight size={12} />}
+          <div className="transition-transform duration-200 group-hover:scale-110">
+            {isPanelOpen ? <ChevronLeft size={11} /> : <ChevronRight size={11} />}
+          </div>
         </button>
 
         {/* Main Center Area */}
-        <div className="flex-1 relative flex flex-col min-w-0 bg-[#0a0a0b]">
+        <div className="flex-1 relative flex flex-col min-w-0 bg-surface">
           {/* Main Content -- switches on active view with crossfade */}
           <div className="flex-1 relative overflow-hidden">
             <div
@@ -230,6 +244,8 @@ export default function App() {
                   onNewScan={handleNewScan}
                   onSelectSession={handleSelectSessionFromWelcome}
                 />
+              ) : activeView === 'pipeline' ? (
+                <PipelineView />
               ) : activeView === 'gallery' ? (
                 <Gallery />
               ) : activeView === 'settings' ? (
@@ -255,16 +271,16 @@ export default function App() {
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20">
             <button
               onClick={() => setIsConsoleOpen(!isConsoleOpen)}
-              className={`flex items-center gap-2 px-4 py-1.5 bg-[#111113]/90 backdrop-blur-md border border-white/10 rounded-full text-[11px] font-medium transition-all duration-200 shadow-xl shadow-black/20 active:scale-95 ${
+              className={`flex items-center gap-2 px-4 py-2 toolbar-glass rounded-full text-xs font-medium transition-all duration-300 active:scale-95 ${
                 isConsoleOpen
-                  ? 'opacity-0 pointer-events-none'
-                  : 'opacity-100 text-zinc-400 hover:text-white hover:scale-105 hover:bg-zinc-800/80'
+                  ? 'opacity-0 pointer-events-none translate-y-2'
+                  : 'opacity-100 text-zinc-400 hover:text-white hover:scale-[1.03]'
               }`}
             >
               <Terminal size={14} className="text-indigo-400" /> View Logs
-              <kbd className="text-zinc-600 text-[9px] font-mono ml-1">Ctrl+`</kbd>
+              <kbd className="text-zinc-600 text-[9px] font-mono ml-1 px-1.5 py-0.5 bg-white/[0.03] rounded">Ctrl+`</kbd>
               {logs.length > 0 && (
-                <span className="ml-1 px-1.5 py-0.5 bg-indigo-500/20 text-indigo-300 rounded-full text-[9px] font-bold tabular-nums">
+                <span className="ml-1 px-1.5 py-0.5 bg-indigo-500/15 text-indigo-300 rounded-full text-[9px] font-bold tabular-nums">
                   {logs.length}
                 </span>
               )}
@@ -273,79 +289,96 @@ export default function App() {
 
           {/* Animated Bottom Console */}
           <div
-            className={`absolute bottom-0 left-0 right-0 transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] z-30 flex flex-col bg-[#0d0d0f]/95 backdrop-blur-2xl border-t border-white/10 rounded-t-2xl shadow-[0_-20px_40px_rgba(0,0,0,0.5)] ${
+            className={`absolute bottom-0 left-0 right-0 transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] z-30 flex flex-col bg-[#0b0b0d]/95 backdrop-blur-2xl border-t border-white/8 rounded-t-2xl shadow-[0_-20px_50px_rgba(0,0,0,0.6)] ${
               isConsoleOpen
                 ? 'translate-y-0 opacity-100'
                 : 'translate-y-full opacity-0'
             }`}
-            style={{ height: '240px' }}
+            style={{ height: '260px' }}
           >
-            <div className="flex items-center justify-between px-4 py-3 border-b border-white/5 shrink-0">
-              <div className="flex items-center gap-2">
-                <Terminal size={14} className="text-zinc-400" />
-                <span className="text-xs font-semibold tracking-wider text-zinc-300">SYSTEM CONSOLE</span>
-                <span className="text-[10px] text-zinc-600 ml-2 tabular-nums">{logs.length} lines</span>
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/5 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="flex items-center gap-1.5">
+                  <div className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
+                  <div className="w-2.5 h-2.5 rounded-full bg-amber-500/60" />
+                  <div className="w-2.5 h-2.5 rounded-full bg-emerald-500/60" />
+                </div>
+                <span className="text-xs font-semibold tracking-wider text-zinc-400 ml-1">CONSOLE</span>
+                <span className="text-[11px] text-zinc-600 tabular-nums">{logs.length} lines</span>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
                 <button
                   onClick={() => usePipelineStore.getState().clearLogs()}
-                  className="text-[10px] text-zinc-500 hover:text-zinc-300 px-2 py-1 bg-white/5 hover:bg-white/[0.08] rounded-md transition-all duration-150 active:scale-95"
+                  className="text-[11px] text-zinc-500 hover:text-zinc-300 px-2.5 py-1 bg-white/[0.03] hover:bg-white/[0.06] rounded-md transition-all duration-150 active:scale-95 border border-white/5"
                 >
                   Clear
                 </button>
-                <button className="text-zinc-500 hover:text-zinc-300 p-1 hover:bg-white/5 rounded-md transition-all duration-150 active:scale-90">
-                  <Maximize2 size={14} />
+                <button className="text-zinc-500 hover:text-zinc-300 p-1.5 hover:bg-white/[0.04] rounded-md transition-all duration-150 active:scale-90">
+                  <Maximize2 size={13} />
                 </button>
                 <button
                   onClick={() => setIsConsoleOpen(false)}
-                  className="text-zinc-500 hover:text-white p-1 bg-white/5 hover:bg-white/[0.08] rounded-md transition-all duration-150 active:scale-90"
+                  className="text-zinc-500 hover:text-white p-1.5 bg-white/[0.03] hover:bg-white/[0.06] rounded-md transition-all duration-150 active:scale-90 border border-white/5"
                 >
-                  <ChevronRight size={14} className="rotate-90" />
+                  <ChevronRight size={13} className="rotate-90" />
                 </button>
               </div>
             </div>
             <div
               ref={consoleRef}
-              className="p-4 font-mono text-[11px] leading-6 text-zinc-400 flex-1 overflow-y-auto scrollbar-hide space-y-0.5"
+              className="px-4 py-3 font-mono text-xs leading-[1.7] text-zinc-400 flex-1 overflow-y-auto scrollbar-hide space-y-px"
             >
               {logs.length === 0 ? (
-                <div className="text-zinc-600 italic">No logs yet. Start the pipeline to see output.</div>
+                <div className="flex flex-col items-center justify-center h-full text-zinc-600">
+                  <Terminal size={20} className="mb-2 opacity-30" />
+                  <span className="text-xs">No logs yet. Start the pipeline to see output.</span>
+                </div>
               ) : (
                 logs.map((log, i) => {
                   const isStageTransition = log.message.match(/(?:===\s*Stage|Running\s+stage|Stage\s+\d+\s+completed)/i);
                   const isStageNameLine = log.message.match(/^Stage\s+\d+[:\s]/i);
                   const isError = log.level === 'error';
+                  const isSuccess = log.message.match(/(?:complete|success|finished|done)/i) && !isError;
 
                   if (isStageTransition) {
                     return (
-                      <div key={i} className="my-1.5">
-                        <div className="h-px bg-gradient-to-r from-transparent via-emerald-500/20 to-transparent" />
-                        <div className="text-emerald-400 font-bold text-[10px] tracking-wider uppercase py-0.5">
+                      <div key={i} className="my-2">
+                        <div className="h-px bg-gradient-to-r from-transparent via-emerald-500/25 to-transparent" />
+                        <div className="text-emerald-400 font-bold text-[11px] tracking-wider uppercase py-1 flex items-center gap-2">
+                          <div className="w-1 h-1 rounded-full bg-emerald-400" />
                           {log.message}
                         </div>
                       </div>
                     );
                   }
 
-                  // Format timestamp to HH:MM:SS
                   const shortTimestamp = log.timestamp.slice(0, 8);
 
                   return (
                     <div
                       key={i}
-                      className={`${
+                      className={`flex items-start gap-2 py-px rounded-sm transition-colors duration-100 hover:bg-white/[0.01] ${
                         isError
-                          ? 'text-red-400 border-l-2 border-red-500/30 pl-2'
-                          : log.level === 'warn'
-                          ? 'text-amber-400'
-                          : log.level === 'stderr'
-                          ? 'text-orange-300/70'
-                          : isStageNameLine
-                          ? 'text-emerald-300 font-bold'
-                          : 'text-zinc-400'
+                          ? 'border-l-2 border-red-500/40 pl-2 bg-red-500/[0.02]'
+                          : ''
                       }`}
                     >
-                      <span className="text-zinc-700 opacity-60 text-[10px]">[{shortTimestamp}]</span> {log.message}
+                      <span className="text-zinc-700 text-[11px] shrink-0 tabular-nums select-none w-[52px]">{shortTimestamp}</span>
+                      <span className={`flex-1 ${
+                        isError
+                          ? 'text-red-400'
+                          : log.level === 'warn'
+                          ? 'text-amber-400/90'
+                          : log.level === 'stderr'
+                          ? 'text-orange-300/60'
+                          : isStageNameLine
+                          ? 'text-emerald-300 font-semibold'
+                          : isSuccess
+                          ? 'text-emerald-400/80'
+                          : 'text-zinc-400'
+                      }`}>
+                        {log.message}
+                      </span>
                     </div>
                   );
                 })

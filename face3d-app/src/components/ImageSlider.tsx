@@ -78,10 +78,10 @@ const ImageSlider: React.FC<ImageSliderProps> = ({
       />
 
       {/* Labels */}
-      <div className="absolute top-3 left-3 bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-md text-[11px] font-semibold text-indigo-400 border border-indigo-500/30 pointer-events-none">
+      <div className="absolute top-3 left-3 bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-md text-xs font-semibold text-indigo-400 border border-indigo-500/30 pointer-events-none">
         {leftLabel}
       </div>
-      <div className="absolute top-3 right-3 bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-md text-[11px] font-semibold text-amber-400 border border-amber-500/30 pointer-events-none">
+      <div className="absolute top-3 right-3 bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-md text-xs font-semibold text-amber-400 border border-amber-500/30 pointer-events-none">
         {rightLabel}
       </div>
 

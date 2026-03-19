@@ -4,7 +4,6 @@ import usePipelineStore from '../store/pipelineStore';
 import useSessionStore from '../store/sessionStore';
 import useSettingsStore from '../store/settingsStore';
 import { getImageCounts } from '../lib/tauri';
-import NewScanWizard from './NewScanWizard';
 
 export type ViewId = 'home' | 'pipeline' | 'view' | 'metrics' | 'gallery' | 'compare' | 'sensors' | 'settings';
 
@@ -21,11 +20,11 @@ const NAV_ITEMS: { id: ViewId; icon: typeof Home; label: string; shortcut: strin
 interface SidebarProps {
   activeView?: ViewId;
   onViewChange?: (view: ViewId) => void;
+  onNewScan?: () => void;
 }
 
-export default function Sidebar({ activeView, onViewChange }: SidebarProps) {
+export default function Sidebar({ activeView, onViewChange, onNewScan }: SidebarProps) {
   const [localActive, setLocalActive] = useState<ViewId>('view');
-  const [wizardOpen, setWizardOpen] = useState(false);
   const active = activeView ?? localActive;
   const setActive = useCallback(
     (v: ViewId) => {
@@ -60,31 +59,30 @@ export default function Sidebar({ activeView, onViewChange }: SidebarProps) {
   const gpuBarHeight = gpuInfo ? Math.max(5, utilization) : 0;
 
   return (
-    <>
-    <div className="w-[60px] h-full bg-[#08080a] border-r border-zinc-800/50 flex flex-col items-center py-4 z-50 shrink-0 relative">
+    <div className="w-[68px] h-full bg-[#08080a] border-r border-border flex flex-col items-center py-5 z-50 shrink-0 relative">
       {/* App Logo */}
-      <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 via-purple-500 to-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/20 mb-8 cursor-pointer hover:scale-105 active:scale-95 transition-all duration-300 ring-1 ring-white/10">
-        <span className="text-white font-black text-[10px] tracking-tight">F3D</span>
+      <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 via-purple-500 to-indigo-600 rounded-card flex items-center justify-center shadow-lg shadow-indigo-500/20 mb-6 cursor-pointer hover:scale-105 active:scale-95 transition-all duration-300 ring-1 ring-white/10 hover:shadow-xl hover:shadow-indigo-500/25">
+        <span className="text-white font-black text-xs tracking-tight">F3D</span>
       </div>
 
-      {/* New Scan Button */}
-      <div className="relative group w-full flex justify-center mb-5">
+      {/* New Scan Button — more breathing room */}
+      <div className="relative group w-full flex justify-center mb-4">
         <button
-          onClick={() => setWizardOpen(true)}
-          className="p-2.5 rounded-xl bg-indigo-600/20 text-indigo-400 hover:bg-indigo-600/30 hover:text-indigo-300 border border-indigo-500/20 hover:border-indigo-500/40 transition-all duration-200 group-active:scale-90 shadow-lg shadow-indigo-500/10"
+          onClick={() => onNewScan?.()}
+          className="p-3 rounded-button bg-indigo-600/20 text-indigo-400 hover:bg-indigo-600/30 hover:text-indigo-300 border border-indigo-500/20 hover:border-indigo-500/40 transition-all duration-200 group-active:scale-90 shadow-lg shadow-indigo-500/10"
         >
           <Plus size={18} strokeWidth={2.5} />
         </button>
-        <div className="absolute left-[64px] top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-[#1c1c1f] text-zinc-100 text-[11px] font-medium tracking-wide rounded-md opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 pointer-events-none transition-all duration-200 delay-200 z-50 whitespace-nowrap shadow-xl shadow-black/30 border border-white/10">
+        <div className="absolute left-[72px] top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-[#1c1c1f] text-zinc-100 text-xs font-medium tracking-wide rounded-md opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 pointer-events-none transition-all duration-200 delay-200 z-50 whitespace-nowrap shadow-xl shadow-black/30 border border-white/10">
           New Scan
         </div>
       </div>
 
       {/* Divider after New Scan */}
-      <div className="w-7 h-px bg-zinc-700/40 mb-5" />
+      <div className="w-7 h-px bg-zinc-700/40 mb-4" />
 
-      {/* Main Navigation */}
-      <nav className="flex-1 flex flex-col gap-2.5 w-full items-center">
+      {/* Main Navigation — more gap between icons */}
+      <nav className="flex-1 flex flex-col gap-4 w-full items-center">
         {NAV_ITEMS.map((item, index) => {
           const isActive = active === item.id;
           const Icon = item.icon;
@@ -107,7 +105,7 @@ export default function Sidebar({ activeView, onViewChange }: SidebarProps) {
 
                 <button
                   onClick={() => setActive(item.id)}
-                  className={`relative p-2.5 rounded-xl transition-all duration-200 group-active:scale-90 ${
+                  className={`relative p-2.5 rounded-button transition-all duration-200 group-active:scale-90 ${
                     isActive
                       ? 'bg-indigo-500/10 text-indigo-400 shadow-[0_0_12px_rgba(99,102,241,0.1)]'
                       : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04] hover:shadow-[0_0_8px_rgba(99,102,241,0.06)]'
@@ -122,7 +120,7 @@ export default function Sidebar({ activeView, onViewChange }: SidebarProps) {
                 </button>
 
                 {/* Tooltip - slides in from left with delay */}
-                <div className="absolute left-[60px] top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-[#1c1c1f] text-zinc-100 text-[11px] font-medium tracking-wide rounded-md opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 pointer-events-none transition-all duration-200 delay-200 z-50 whitespace-nowrap shadow-xl shadow-black/30 border border-white/10 flex items-center gap-2">
+                <div className="absolute left-[72px] top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-[#1c1c1f] text-zinc-100 text-xs font-medium tracking-wide rounded-md opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 pointer-events-none transition-all duration-200 delay-200 z-50 whitespace-nowrap shadow-xl shadow-black/30 border border-white/10 flex items-center gap-2">
                   {item.label}
                   {item.shortcut && (
                     <span className="text-zinc-500 text-[9px] font-mono">{item.shortcut}</span>
@@ -152,7 +150,7 @@ export default function Sidebar({ activeView, onViewChange }: SidebarProps) {
           )}
           <button
             onClick={() => setActive('settings')}
-            className={`relative p-2.5 rounded-xl active:scale-90 transition-all duration-200 ${
+            className={`relative p-2.5 rounded-button active:scale-90 transition-all duration-200 ${
               active === 'settings'
                 ? 'bg-indigo-500/10 text-indigo-400 shadow-[0_0_12px_rgba(99,102,241,0.1)]'
                 : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.04]'
@@ -163,7 +161,7 @@ export default function Sidebar({ activeView, onViewChange }: SidebarProps) {
               <span className="absolute top-1 right-1 w-2 h-2 bg-amber-400 rounded-full shadow-[0_0_6px_rgba(251,191,36,0.6)] animate-pulse" />
             )}
           </button>
-          <div className="absolute left-[60px] top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-[#1c1c1f] text-zinc-100 text-[11px] font-medium tracking-wide rounded-md opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 pointer-events-none transition-all duration-200 delay-200 z-50 whitespace-nowrap shadow-xl shadow-black/30 border border-white/10 flex items-center gap-2">
+          <div className="absolute left-[72px] top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-[#1c1c1f] text-zinc-100 text-xs font-medium tracking-wide rounded-md opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 pointer-events-none transition-all duration-200 delay-200 z-50 whitespace-nowrap shadow-xl shadow-black/30 border border-white/10 flex items-center gap-2">
             Settings
             {useSettingsStore.getState().isDirty && (
               <span className="text-amber-400 text-[9px]">unsaved</span>
@@ -195,8 +193,8 @@ export default function Sidebar({ activeView, onViewChange }: SidebarProps) {
           </div>
 
           {/* GPU Tooltip */}
-          <div className="absolute left-[60px] bottom-0 px-3 py-2 bg-[#1c1c1f] text-zinc-100 text-[11px] font-medium rounded-lg opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 pointer-events-none transition-all duration-200 delay-200 z-50 whitespace-nowrap border border-white/10 shadow-2xl shadow-black/40 flex flex-col gap-1">
-            <div className="text-zinc-400 text-[10px] uppercase tracking-wider border-b border-white/5 pb-1 mb-1">
+          <div className="absolute left-[72px] bottom-0 px-3 py-2 bg-[#1c1c1f] text-zinc-100 text-xs font-medium rounded-lg opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 pointer-events-none transition-all duration-200 delay-200 z-50 whitespace-nowrap border border-white/10 shadow-2xl shadow-black/40 flex flex-col gap-1">
+            <div className="text-zinc-400 text-xs uppercase tracking-wider border-b border-white/5 pb-1 mb-1">
               Hardware Status
             </div>
             <div className="flex justify-between gap-4">
@@ -225,12 +223,8 @@ export default function Sidebar({ activeView, onViewChange }: SidebarProps) {
         </div>
 
         {/* Version */}
-        <div className="text-[8px] text-zinc-700 font-mono tracking-tight pb-1">v0.1.0</div>
+        <div className="text-[8px] text-zinc-700 font-mono tracking-tight pb-1">v2.0.4</div>
       </div>
     </div>
-
-    {/* New Scan Wizard Modal */}
-    <NewScanWizard isOpen={wizardOpen} onClose={() => setWizardOpen(false)} />
-    </>
   );
 }

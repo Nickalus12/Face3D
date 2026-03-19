@@ -338,7 +338,7 @@ const CompareView: React.FC = () => {
         <div className="flex items-center gap-4 max-w-5xl mx-auto">
           {/* Session A */}
           <div className="flex-1">
-            <label className="block text-[10px] font-bold tracking-wider text-indigo-400 uppercase mb-1.5">
+            <label className="block text-[11px] font-bold tracking-wider text-indigo-400 uppercase mb-1.5">
               Session A
             </label>
             <select
@@ -366,7 +366,7 @@ const CompareView: React.FC = () => {
 
           {/* Session B */}
           <div className="flex-1">
-            <label className="block text-[10px] font-bold tracking-wider text-amber-400 uppercase mb-1.5">
+            <label className="block text-[11px] font-bold tracking-wider text-amber-400 uppercase mb-1.5">
               Session B
             </label>
             <select
@@ -395,7 +395,7 @@ const CompareView: React.FC = () => {
         <div className="max-w-5xl mx-auto px-6 py-6 space-y-8">
           {/* ── Metrics Comparison ──────────────────────────────── */}
           <section>
-            <h3 className="text-[10px] font-bold tracking-wider text-zinc-500 uppercase mb-4">
+            <h3 className="text-[11px] font-bold tracking-wider text-zinc-500 uppercase mb-4">
               Metrics Comparison
             </h3>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
@@ -422,7 +422,7 @@ const CompareView: React.FC = () => {
                     key={row.label}
                     className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl p-4 flex flex-col gap-3"
                   >
-                    <div className="text-[10px] font-bold tracking-wider text-zinc-500 uppercase">
+                    <div className="text-[11px] font-bold tracking-wider text-zinc-500 uppercase">
                       {row.label}
                     </div>
                     <div className="flex items-end justify-between gap-2">
@@ -439,7 +439,7 @@ const CompareView: React.FC = () => {
                             : formatNumber(row.valueA)}
                         </span>
                         {row.unit && row.valueA != null && !row.label.includes('Size') && (
-                          <span className="text-[10px] text-zinc-600">{row.unit}</span>
+                          <span className="text-[11px] text-zinc-600">{row.unit}</span>
                         )}
                       </div>
 
@@ -455,7 +455,7 @@ const CompareView: React.FC = () => {
                               <TrendingDown size={14} className="text-red-400" />
                             )}
                             <span
-                              className={`text-[10px] font-mono ${
+                              className={`text-[11px] font-mono ${
                                 Math.abs(diff) < 0.5
                                   ? 'text-zinc-500'
                                   : bIsWinner
@@ -485,7 +485,7 @@ const CompareView: React.FC = () => {
                             : formatNumber(row.valueB)}
                         </span>
                         {row.unit && row.valueB != null && !row.label.includes('Size') && (
-                          <span className="text-[10px] text-zinc-600">{row.unit}</span>
+                          <span className="text-[11px] text-zinc-600">{row.unit}</span>
                         )}
                       </div>
                     </div>
@@ -499,13 +499,13 @@ const CompareView: React.FC = () => {
           {maxFrames > 0 && (
             <section>
               <div className="flex items-center justify-between mb-4">
-                <h3 className="text-[10px] font-bold tracking-wider text-zinc-500 uppercase">
+                <h3 className="text-[11px] font-bold tracking-wider text-zinc-500 uppercase">
                   Visual Comparison
                 </h3>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => setCompareMode('slider')}
-                    className={`px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
                       compareMode === 'slider'
                         ? 'bg-indigo-500/15 text-indigo-400 border border-indigo-500/30'
                         : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
@@ -516,7 +516,7 @@ const CompareView: React.FC = () => {
                   </button>
                   <button
                     onClick={() => setCompareMode('overlay')}
-                    className={`px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
                       compareMode === 'overlay'
                         ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
                         : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
@@ -554,10 +554,10 @@ const CompareView: React.FC = () => {
                         style={{ opacity: overlayOpacity / 100 }}
                       />
                       {/* Labels */}
-                      <div className="absolute top-3 left-3 bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-md text-[11px] font-semibold text-indigo-400 border border-indigo-500/30">
+                      <div className="absolute top-3 left-3 bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-md text-xs font-semibold text-indigo-400 border border-indigo-500/30">
                         A (base)
                       </div>
-                      <div className="absolute top-3 right-3 bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-md text-[11px] font-semibold text-amber-400 border border-amber-500/30">
+                      <div className="absolute top-3 right-3 bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-md text-xs font-semibold text-amber-400 border border-amber-500/30">
                         B ({overlayOpacity}%)
                       </div>
                     </div>
@@ -578,7 +578,7 @@ const CompareView: React.FC = () => {
                 {/* Frame selector */}
                 {maxFrames > 1 && (
                   <div className="flex-1">
-                    <label className="text-[10px] text-zinc-500 font-medium block mb-1">
+                    <label className="text-[11px] text-zinc-500 font-medium block mb-1">
                       Frame {frameIndex + 1} / {maxFrames}
                     </label>
                     <input
@@ -595,7 +595,7 @@ const CompareView: React.FC = () => {
                 {/* Opacity slider for overlay mode */}
                 {compareMode === 'overlay' && (
                   <div className="w-48">
-                    <label className="text-[10px] text-zinc-500 font-medium block mb-1">
+                    <label className="text-[11px] text-zinc-500 font-medium block mb-1">
                       B Opacity: {overlayOpacity}%
                     </label>
                     <input
@@ -615,20 +615,20 @@ const CompareView: React.FC = () => {
           {/* ── Parameter Diff ──────────────────────────────────── */}
           {paramDiffs.length > 0 && (
             <section>
-              <h3 className="text-[10px] font-bold tracking-wider text-zinc-500 uppercase mb-4">
+              <h3 className="text-[11px] font-bold tracking-wider text-zinc-500 uppercase mb-4">
                 Parameter Differences
               </h3>
               <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl overflow-hidden">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-zinc-800/60">
-                      <th className="text-left px-4 py-2.5 text-[10px] font-bold tracking-wider text-zinc-500 uppercase">
+                      <th className="text-left px-4 py-2.5 text-[11px] font-bold tracking-wider text-zinc-500 uppercase">
                         Parameter
                       </th>
-                      <th className="text-right px-4 py-2.5 text-[10px] font-bold tracking-wider text-indigo-400 uppercase">
+                      <th className="text-right px-4 py-2.5 text-[11px] font-bold tracking-wider text-indigo-400 uppercase">
                         Session A
                       </th>
-                      <th className="text-right px-4 py-2.5 text-[10px] font-bold tracking-wider text-amber-400 uppercase">
+                      <th className="text-right px-4 py-2.5 text-[11px] font-bold tracking-wider text-amber-400 uppercase">
                         Session B
                       </th>
                     </tr>
@@ -661,14 +661,14 @@ const CompareView: React.FC = () => {
           {/* ── Chart Overlays ──────────────────────────────────── */}
           {(psnrChartData.length > 0 || lossChartData.length > 0) && (
             <section>
-              <h3 className="text-[10px] font-bold tracking-wider text-zinc-500 uppercase mb-4">
+              <h3 className="text-[11px] font-bold tracking-wider text-zinc-500 uppercase mb-4">
                 Training Curves
               </h3>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {/* PSNR Chart */}
                 {psnrChartData.length > 0 && (
                   <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl p-4">
-                    <div className="text-[10px] font-bold tracking-wider text-zinc-500 uppercase mb-3">
+                    <div className="text-[11px] font-bold tracking-wider text-zinc-500 uppercase mb-3">
                       PSNR Over Training
                     </div>
                     <ResponsiveContainer width="100%" height={240}>
@@ -723,7 +723,7 @@ const CompareView: React.FC = () => {
                 {/* Loss Chart */}
                 {lossChartData.length > 0 && (
                   <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-xl p-4">
-                    <div className="text-[10px] font-bold tracking-wider text-zinc-500 uppercase mb-3">
+                    <div className="text-[11px] font-bold tracking-wider text-zinc-500 uppercase mb-3">
                       Loss Over Training
                     </div>
                     <ResponsiveContainer width="100%" height={240}>

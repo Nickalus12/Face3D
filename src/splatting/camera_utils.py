@@ -311,7 +311,7 @@ def _read_images_text(
     """Read images.txt -> {img_id: (qvec, tvec, camera_id, name)}."""
     images = {}
     with open(path, "r") as f:
-        lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+        lines = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
     # images.txt has pairs of lines: metadata line + points2D line
     for i in range(0, len(lines), 2):
         parts = lines[i].split()

@@ -1,0 +1,4 @@
+# file: D:\Projects\3D\src\capture\__init__.py
+# hypothesis_version: 6.151.9
+
+['batch_color_correct', 'extract_frames', 'filter_frames', 'process_200mp_photos', 'process_photos']

@@ -13,17 +13,28 @@ import logging
 from pathlib import Path
 
 import cv2
-import mediapipe as mp
 import numpy as np
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
-# Handle MediaPipe API changes across versions
-if hasattr(mp, "solutions") and hasattr(mp.solutions, "selfie_segmentation"):
-    _selfie_seg_module = mp.solutions.selfie_segmentation
-else:
-    from mediapipe.python.solutions import selfie_segmentation as _selfie_seg_module
+# MediaPipe is lazy-loaded to avoid ~1.5s import overhead when this module
+# is imported but segmentation isn't needed (e.g. pipeline startup, tests).
+_selfie_seg_module = None
+
+
+def _get_selfie_seg_module():
+    """Lazy-load MediaPipe selfie segmentation module on first use."""
+    global _selfie_seg_module
+    if _selfie_seg_module is None:
+        import mediapipe as mp
+        if hasattr(mp, "solutions") and hasattr(mp.solutions, "selfie_segmentation"):
+            _selfie_seg_module = mp.solutions.selfie_segmentation
+        else:
+            from mediapipe.python.solutions import selfie_segmentation as _ss
+            _selfie_seg_module = _ss
+        logger.debug("MediaPipe selfie segmentation module loaded")
+    return _selfie_seg_module
 
 # ---------------------------------------------------------------------------
 # SAM2 availability check
@@ -279,7 +290,7 @@ class FaceSegmenter:
             self._model_type = "mediapipe"
 
         if self._model_type == "mediapipe":
-            self._segmenter = _selfie_seg_module.SelfieSegmentation(
+            self._segmenter = _get_selfie_seg_module().SelfieSegmentation(
                 model_selection=1,  # 1 = general model (landscape), 0 = closer-range
             )
 
@@ -395,9 +406,29 @@ class FaceSegmenter:
             logger.warning("No images found in %s", frames_dir)
             return []
 
-        logger.info("Segmenting %d images ...", len(image_paths))
+        # --- Skip images that already have mask files ---
+        pending_indices: list[int] = []
+        all_output_paths: list[Path] = []
+        for i, img_path in enumerate(image_paths):
+            out_path = output_dir / (img_path.stem + "_mask.png")
+            all_output_paths.append(out_path)
+            if not out_path.exists():
+                pending_indices.append(i)
 
-        # --- Pre-load images in parallel (I/O-bound) ---
+        if not pending_indices:
+            logger.info("All %d mask files already exist, skipping", len(image_paths))
+            return all_output_paths
+
+        skipped = len(image_paths) - len(pending_indices)
+        if skipped > 0:
+            logger.info(
+                "Segmenting %d images (%d already processed, skipped) ...",
+                len(pending_indices), skipped,
+            )
+        else:
+            logger.info("Segmenting %d images ...", len(image_paths))
+
+        # --- Pre-load only pending images in parallel (I/O-bound) ---
         if max_workers is None:
             max_workers = get_optimal_workers("io")
 
@@ -407,21 +438,23 @@ class FaceSegmenter:
             idx, path = idx_path
             return idx, cv2.imread(str(path))
 
+        pending_paths = [(i, image_paths[i]) for i in pending_indices]
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
                 pool.submit(_read_image, (i, p)): i
-                for i, p in enumerate(image_paths)
+                for i, p in pending_paths
             }
             for fut in as_completed(futures):
                 idx, img = fut.result()
                 loaded_images[idx] = img
 
-        # --- Sequential MediaPipe segmentation ---
+        # --- Sequential MediaPipe segmentation (only pending frames) ---
         output_paths: list[Path] = []
         quality_scores: list[float] = []
         low_quality_count = 0
 
-        for i, img_path in enumerate(tqdm(image_paths, desc="Segmentation")):
+        for i in tqdm(pending_indices, desc="Segmentation"):
+            img_path = image_paths[i]
             image = loaded_images.get(i)
             if image is None:
                 logger.warning("Could not read image: %s", img_path)
@@ -442,7 +475,7 @@ class FaceSegmenter:
                     "Low mask quality (%.2f) for %s", quality, img_path.name,
                 )
 
-            out_path = output_dir / (img_path.stem + "_mask.png")
+            out_path = all_output_paths[i]
             cv2.imwrite(str(out_path), mask)
             output_paths.append(out_path)
 
@@ -453,8 +486,8 @@ class FaceSegmenter:
         if quality_scores:
             mean_quality = sum(quality_scores) / len(quality_scores)
             logger.info(
-                "Saved %d masks to %s (mean quality: %.3f, low quality: %d)",
-                len(output_paths), output_dir, mean_quality, low_quality_count,
+                "Saved %d new masks to %s (mean quality: %.3f, low quality: %d, %d skipped)",
+                len(output_paths), output_dir, mean_quality, low_quality_count, skipped,
             )
             if low_quality_count > 0:
                 logger.warning(
@@ -464,7 +497,7 @@ class FaceSegmenter:
         else:
             logger.info("Saved %d masks to %s", len(output_paths), output_dir)
 
-        return output_paths
+        return all_output_paths
 
     def close(self) -> None:
         if hasattr(self, "_segmenter") and self._segmenter is not None and hasattr(self._segmenter, "close"):

@@ -1,0 +1,4 @@
+# file: D:\Projects\3D\src\reconstruction\colmap_runner.py
+# hypothesis_version: 6.151.9
+
+[0.25, 0.5, 1.0, 2.0, 3840, 8192, 16384, '#', '--Mapper.num_threads', '--database_path', '--image_path', '--input_path', '--input_type', '--max_image_size', '--num_threads', '--output_path', '--output_type', '--workspace_format', '--workspace_path', '-1', '.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '0', '0.004', '0.01', '0.1', '0.7', '0.85', '1', '1.0', '10.0', '100', '10000', '15', '16', '2', '2.0', '20', '3', '32768', '3840', '4', '40', '5', '50', 'COLMAP', 'Command: %s', 'OPENCV', '[%s] %s', 'database.db', 'dense', 'feature_extractor', 'fused.ply', 'geometric', 'hloc', 'image_undistorter', 'images', 'images.bin', 'mapper', 'output', 'pairs.txt', 'patch_match_stereo', 'r', 'sequential_matcher', 'sparse', 'stereo_fusion', 'superglue', 'superpoint_aachen', 'utf-8', 'vocab_tree.bin', 'w']
