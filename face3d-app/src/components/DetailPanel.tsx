@@ -228,6 +228,25 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
                     {session.name}
                   </p>
 
+                  {/* Quality grade + size */}
+                  {(session.quality_grade || session.total_size_bytes) && (
+                    <div className="flex items-center gap-2 mb-1.5 text-xs text-zinc-500">
+                      {session.quality_grade && (
+                        <span className={`font-bold ${
+                          session.quality_grade === 'A' ? 'text-emerald-400' :
+                          session.quality_grade === 'B' ? 'text-blue-400' :
+                          session.quality_grade === 'C' ? 'text-amber-400' :
+                          'text-zinc-400'
+                        }`}>
+                          {session.quality_grade}
+                        </span>
+                      )}
+                      {session.total_size_bytes && session.total_size_bytes > 0 && (
+                        <span>{formatBytes(session.total_size_bytes)}</span>
+                      )}
+                    </div>
+                  )}
+
                   {/* Status badges */}
                   <div className="flex gap-1.5 mb-2 flex-wrap">
                     {session.has_gaussians && (

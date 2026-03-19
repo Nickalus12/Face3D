@@ -274,5 +274,50 @@ function dbToSession(record: SessionRecord): Session {
     has_gaussians: record.has_gaussians === 1,
     has_mesh: record.has_mesh === 1,
     has_renders: record.has_renders === 1,
+    // Extended fields from DB
+    quality_grade: record.quality_grade ?? undefined,
+    quality_score: record.quality_score ?? undefined,
+    total_size_bytes: record.total_size_bytes ?? undefined,
+    status: record.status ?? undefined,
+    created_at: record.created_at ?? undefined,
   };
+}
+
+/**
+ * Get rich session summary from DB (stages, training metrics, frame quality).
+ */
+export async function getSessionSummaryFromDb(sessionId: string): Promise<any | null> {
+  if (!initialized) return null;
+  try {
+    const { getSessionSummary } = await import('./database');
+    return await getSessionSummary(sessionId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get training metrics for charting from DB.
+ */
+export async function getTrainingMetricsFromDb(sessionId: string): Promise<any[]> {
+  if (!initialized) return [];
+  try {
+    const { getTrainingMetrics } = await import('./database');
+    return await getTrainingMetrics(sessionId);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Compare quality across all sessions.
+ */
+export async function compareSessionsFromDb(): Promise<any[]> {
+  if (!initialized) return [];
+  try {
+    const { compareSessionQuality } = await import('./database');
+    return await compareSessionQuality();
+  } catch {
+    return [];
+  }
 }

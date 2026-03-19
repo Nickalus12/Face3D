@@ -31,6 +31,12 @@ export interface Session {
   has_gaussians: boolean;
   has_mesh: boolean;
   has_renders: boolean;
+  // Extended fields from DB (optional for backward compat)
+  quality_grade?: string;
+  quality_score?: number;
+  total_size_bytes?: number;
+  status?: string;
+  created_at?: string;
 }
 
 export interface GpuInfo {
