@@ -59,8 +59,8 @@ reconstruction:
     chunk_size: 16  # Frames per DA3 inference call (auto-halves on OOM, cached per session)
     conf_threshold: 0.0  # 0.0 = adaptive percentile-based threshold (keeps top 70%)
     conf_percentile: 30.0  # Percentile for adaptive threshold (lower = keep more points)
-    deduplicate: true  # Skip near-duplicate adjacent frames (perceptual hash)
-    dedup_threshold: 8  # Hamming distance threshold for dedup (lower = more aggressive, 5 was too strict)
+    deduplicate: false  # Disabled: orbit videos have many similar frames by design. Frame extraction already does motion-based selection.
+    dedup_threshold: 5  # Only matters if deduplicate=true
     use_streaming_ply: true  # Stream PLY writes to reduce peak memory
     checkpoint_version: "auto"  # "auto" uses latest available, or specify "1.0", "1.1"
     use_streaming: false  # Native DA3 sliding-window streaming (experimental, <12GB VRAM)
@@ -94,7 +94,7 @@ reconstruction:
       expression_reg_weight: 1.0e-4
       pose_reg_weight: 1.0e-3
       # Joint optimization (GaussianSwap-inspired temporal consistency)
-      joint_optimization: true
+      joint_optimization: false  # Disabled: inplace gradient bug in joint optimizer (needs fix)
       joint_keyframes: 10
       joint_iterations: 200
       temporal_smoothness_weight: 0.1
