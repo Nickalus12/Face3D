@@ -178,10 +178,28 @@ const NewScanWizard: React.FC<NewScanWizardProps> = ({ isOpen, onClose }) => {
 
   const handleStart = async () => {
     if (!contentDir) return;
+
+    // 1. Create session in local store (instant UI update)
     createSession(sessionName, contentDir);
+
+    // 2. Write to DB with scan results + config (persists across restarts)
+    try {
+      const { upsertSession } = await import("../lib/database");
+      await upsertSession({
+        id: sessionName.trim().replace(/\s+/g, "_").toLowerCase(),
+        name: sessionName,
+        contentDir,
+        photoCount: detectedFiles?.photos ?? 0,
+        sensorLogCount: detectedFiles?.sensorLogs ?? 0,
+      });
+    } catch {
+      // DB write failed — non-fatal, pipeline still works
+    }
+
+    // 3. Start the pipeline
     try {
       await startPipeline(contentDir, sessionName);
-      addToast("Pipeline started successfully", "success");
+      addToast(`Pipeline started for "${sessionName}"`, "success");
       handleClose();
     } catch {
       addToast("Failed to start pipeline", "error");
@@ -472,9 +490,36 @@ const NewScanWizard: React.FC<NewScanWizardProps> = ({ isOpen, onClose }) => {
           {/* ── STEP 3: Review ───────────────────────── */}
           {step === 3 && (
             <div key="step3" className={`space-y-4 ${slideClass}`}>
+              {/* Input data summary */}
+              {detectedFiles && (
+                <div className="p-4 rounded-xl bg-emerald-500/[0.04] border border-emerald-500/15 space-y-2.5">
+                  <div className="text-xs font-semibold text-emerald-400 uppercase tracking-wider mb-1">
+                    Input Data
+                  </div>
+                  <div className="grid grid-cols-3 gap-3 text-center">
+                    <div>
+                      <div className="text-lg font-bold text-zinc-200">{detectedFiles.videos}</div>
+                      <div className="text-[11px] text-zinc-500">Videos</div>
+                    </div>
+                    <div>
+                      <div className="text-lg font-bold text-zinc-200">{detectedFiles.photos}</div>
+                      <div className="text-[11px] text-zinc-500">Photos</div>
+                    </div>
+                    <div>
+                      <div className="text-lg font-bold text-zinc-200">{detectedFiles.sensorLogs}</div>
+                      <div className="text-[11px] text-zinc-500">Sensor Logs</div>
+                    </div>
+                  </div>
+                  <div className="text-xs text-zinc-500 text-center pt-1 border-t border-emerald-500/10">
+                    {detectedFiles.totalSize} total
+                  </div>
+                </div>
+              )}
+
+              {/* Pipeline config summary */}
               <div className="p-4 rounded-xl bg-zinc-900/40 border border-zinc-800/50 space-y-3">
                 <div className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">
-                  Summary
+                  Configuration
                 </div>
 
                 <div className="flex items-center justify-between text-sm">
@@ -484,18 +529,9 @@ const NewScanWizard: React.FC<NewScanWizardProps> = ({ isOpen, onClose }) => {
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-sm">
-                  <span className="text-zinc-500">Content</span>
-                  <span
-                    className="text-zinc-200 font-mono text-xs max-w-[260px] truncate"
-                    title={contentDir ?? ""}
-                  >
-                    {contentDir}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-sm">
                   <span className="text-zinc-500">Quality</span>
                   <span className="text-indigo-300 font-medium capitalize">
-                    {preset}
+                    {preset} — {PRESET_META[preset].time}
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-sm">
@@ -509,10 +545,6 @@ const NewScanWizard: React.FC<NewScanWizardProps> = ({ isOpen, onClose }) => {
                   <span className="text-zinc-200">
                     {advanced.maxGaussians.toLocaleString()}
                   </span>
-                </div>
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-zinc-500">Resolution</span>
-                  <span className="text-zinc-200">{advanced.resolution}px</span>
                 </div>
               </div>
 
@@ -529,10 +561,10 @@ const NewScanWizard: React.FC<NewScanWizardProps> = ({ isOpen, onClose }) => {
                   <Cpu size={16} className="text-indigo-400" />
                   <span className="text-sm font-medium text-zinc-200">
                     {preset === "maximum"
-                      ? "12+ GB"
-                      : preset === "balanced"
                       ? "8+ GB"
-                      : "4+ GB"}
+                      : preset === "balanced"
+                      ? "5+ GB"
+                      : "3+ GB"}
                   </span>
                   <span className="text-[11px] text-zinc-500">VRAM Req.</span>
                 </div>
