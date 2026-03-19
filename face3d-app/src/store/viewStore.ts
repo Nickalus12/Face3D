@@ -5,9 +5,7 @@ export type ViewId =
   | "pipeline"
   | "view"
   | "metrics"
-  | "gallery"
-  | "compare"
-  | "sensors";
+  | "gallery";
 
 interface ViewState {
   activeView: ViewId;

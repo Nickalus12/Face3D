@@ -17,11 +17,10 @@ interface Shortcut {
 
 const SHORTCUTS: Shortcut[] = [
   { keys: 'Ctrl+1', label: 'Dashboard', category: 'Navigation' },
-  { keys: 'Ctrl+2', label: 'Pipeline Config', category: 'Navigation' },
-  { keys: 'Ctrl+3', label: '3D Workspace', category: 'Navigation' },
-  { keys: 'Ctrl+4', label: 'Performance Metrics', category: 'Navigation' },
-  { keys: 'Ctrl+5', label: 'Compare Sessions', category: 'Navigation' },
-  { keys: 'Ctrl+6', label: 'Sensor Data', category: 'Navigation' },
+  { keys: 'Ctrl+2', label: 'Pipeline', category: 'Navigation' },
+  { keys: 'Ctrl+3', label: '3D View', category: 'Navigation' },
+  { keys: 'Ctrl+4', label: 'Gallery', category: 'Navigation' },
+  { keys: 'Ctrl+5', label: 'Metrics', category: 'Navigation' },
   { keys: 'Ctrl+`', label: 'Toggle Console', category: 'Panels' },
   { keys: 'Ctrl+N', label: 'New Scan Wizard', category: 'Actions' },
   { keys: 'Space', label: 'Start / Stop Pipeline', category: 'Actions' },
@@ -40,7 +39,6 @@ export default function KeyboardShortcuts({
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      // Don't capture if user is typing in an input
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
         return;
@@ -49,15 +47,13 @@ export default function KeyboardShortcuts({
       const ctrl = e.ctrlKey || e.metaKey;
       const shift = e.shiftKey;
 
-      // Ctrl+1-5: Switch views
       if (ctrl && !shift) {
         const viewMap: Record<string, ViewId> = {
           '1': 'home',
           '2': 'pipeline',
           '3': 'view',
-          '4': 'metrics',
-          '5': 'compare',
-          '6': 'sensors',
+          '4': 'gallery',
+          '5': 'metrics',
         };
         if (viewMap[e.key]) {
           e.preventDefault();
@@ -66,42 +62,36 @@ export default function KeyboardShortcuts({
         }
       }
 
-      // Ctrl+`: Toggle console
       if (ctrl && e.key === '`') {
         e.preventDefault();
         onToggleConsole();
         return;
       }
 
-      // Ctrl+N: New scan
       if (ctrl && !shift && e.key === 'n') {
         e.preventDefault();
         onNewScan?.();
         return;
       }
 
-      // Space: Start/stop pipeline
       if (e.key === ' ' && !ctrl && !shift) {
         e.preventDefault();
         onStartStop?.();
         return;
       }
 
-      // Ctrl+Shift+O: Open session folder
       if (ctrl && shift && (e.key === 'o' || e.key === 'O')) {
         e.preventDefault();
         onOpenSessionFolder?.();
         return;
       }
 
-      // Ctrl+? (Ctrl+Shift+/): Show help
       if (ctrl && shift && e.key === '?') {
         e.preventDefault();
         setShowHelp((prev) => !prev);
         return;
       }
 
-      // Escape to close help
       if (e.key === 'Escape' && showHelp) {
         setShowHelp(false);
         return;
@@ -117,7 +107,6 @@ export default function KeyboardShortcuts({
 
   if (!showHelp) return null;
 
-  // Group shortcuts by category
   const categories = SHORTCUTS.reduce((acc, s) => {
     if (!acc[s.category]) acc[s.category] = [];
     acc[s.category].push(s);
@@ -129,21 +118,15 @@ export default function KeyboardShortcuts({
       className="fixed inset-0 z-[100] flex items-center justify-center animate-fadeIn"
       onClick={() => setShowHelp(false)}
     >
-      {/* Backdrop */}
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
-
-      {/* Modal */}
       <div
         className="relative bg-[#111113] border border-zinc-800/60 rounded-2xl shadow-2xl shadow-black/50 w-[420px] max-h-[70vh] overflow-hidden animate-scaleIn"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
         <div className="px-6 pt-5 pb-4 border-b border-zinc-800/40">
           <h2 className="text-zinc-100 text-base font-semibold">Keyboard Shortcuts</h2>
           <p className="text-zinc-500 text-xs mt-1">Quick navigation and actions</p>
         </div>
-
-        {/* Shortcuts List */}
         <div className="px-6 py-4 space-y-5 overflow-y-auto scrollbar-hide max-h-[50vh]">
           {Object.entries(categories).map(([category, shortcuts]) => (
             <div key={category}>
@@ -166,8 +149,6 @@ export default function KeyboardShortcuts({
             </div>
           ))}
         </div>
-
-        {/* Footer */}
         <div className="px-6 py-3 border-t border-zinc-800/40 flex justify-end">
           <button
             onClick={() => setShowHelp(false)}

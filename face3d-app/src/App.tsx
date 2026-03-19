@@ -8,9 +8,6 @@ import WelcomeScreen from './components/WelcomeScreen';
 // Lazy-load heavy components (Three.js, recharts, etc.) — only load when needed
 const Viewer3D = lazy(() => import('./components/Viewer3D'));
 const Gallery = lazy(() => import('./components/Gallery').then(m => ({ default: m.Gallery })));
-const SensorPanel = lazy(() => import('./components/SensorPanel'));
-const CameraTrajectory = lazy(() => import('./components/CameraTrajectory'));
-const CompareView = lazy(() => import('./components/CompareView'));
 const SettingsPanel = lazy(() => import('./components/SettingsPanel'));
 const TrainingMetrics = lazy(() => import('./components/TrainingMetrics').then(m => ({ default: m.TrainingMetrics })));
 const PipelineView = lazy(() => import('./components/PipelineView'));
@@ -25,7 +22,6 @@ import {
 import useSessionStore from './store/sessionStore';
 import usePipelineStore from './store/pipelineStore';
 import useToastStore from './store/toastStore';
-import { openFolder } from './lib/tauri';
 import { bindToast } from './lib/api';
 import { usePipelineEvents } from './hooks/usePipelineEvents';
 import ToastContainer from './components/Toast';
@@ -35,7 +31,7 @@ import NewScanWizard from './components/NewScanWizard';
 export default function App() {
   const [activeView, setActiveView] = useState<ViewId>('view');
   const [isPanelOpen, setIsPanelOpen] = useState(true);
-  const [panelWidth, setPanelWidth] = useState(280);
+  const [panelWidth, setPanelWidth] = useState(240);
   const [isConsoleOpen, setIsConsoleOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -146,10 +142,6 @@ export default function App() {
     document.addEventListener('mouseup', onMouseUp);
   }, [panelWidth]);
 
-  const handleOpenProjectFolder = useCallback(() => {
-    openFolder('data/output');
-  }, []);
-
   const handleNewScan = useCallback(() => {
     setWizardOpen(true);
   }, []);
@@ -174,12 +166,10 @@ export default function App() {
       <TopBar
         activeView={activeView}
         onViewChange={handleViewChange}
-        onNewScan={handleNewScan}
-        onOpenFolder={handleOpenProjectFolder}
       />
 
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar activeView={activeView} onViewChange={handleViewChange} onNewScan={handleNewScan} />
+        <Sidebar activeView={activeView} onViewChange={handleViewChange} />
 
         {/* Collapsible Detail Panel with draggable resize */}
         <div
@@ -188,7 +178,7 @@ export default function App() {
           }`}
           style={isPanelOpen ? { width: `${panelWidth}px` } : undefined}
         >
-          <DetailPanel isExpanded={isPanelOpen} onToggle={() => setIsPanelOpen(!isPanelOpen)} />
+          <DetailPanel isExpanded={isPanelOpen} />
 
           {/* Master Control */}
           <div className="p-3 border-t border-border bg-zinc-900/20 shrink-0">
@@ -258,15 +248,6 @@ export default function App() {
                     <Gallery />
                   ) : activeView === 'settings' ? (
                     <SettingsPanel />
-                  ) : activeView === 'sensors' ? (
-                    <div className="h-full overflow-y-auto scrollbar-hide">
-                      <SensorPanel />
-                      <div className="px-6 pb-6">
-                        <CameraTrajectory />
-                      </div>
-                    </div>
-                  ) : activeView === 'compare' ? (
-                    <CompareView />
                   ) : activeView === 'metrics' ? (
                     <TrainingMetrics />
                   ) : (
@@ -288,9 +269,9 @@ export default function App() {
               }`}
             >
               <Terminal size={14} className="text-indigo-400" /> View Logs
-              <kbd className="text-zinc-600 text-[9px] font-mono ml-1 px-1.5 py-0.5 bg-white/[0.03] rounded">Ctrl+`</kbd>
+              <kbd className="text-zinc-600 text-[10px] font-mono ml-1 px-1.5 py-0.5 bg-white/[0.03] rounded">Ctrl+`</kbd>
               {logs.length > 0 && (
-                <span className="ml-1 px-1.5 py-0.5 bg-indigo-500/15 text-indigo-300 rounded-full text-[9px] font-bold tabular-nums">
+                <span className="ml-1 px-1.5 py-0.5 bg-indigo-500/15 text-indigo-300 rounded-full text-[10px] font-bold tabular-nums">
                   {logs.length}
                 </span>
               )}
