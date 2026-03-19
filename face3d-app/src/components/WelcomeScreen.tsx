@@ -111,7 +111,7 @@ export default function WelcomeScreen({ onNewScan }: WelcomeScreenProps) {
         {/* New Scan CTA */}
         <button
           onClick={onNewScan}
-          className="w-full group flex items-center gap-4 p-4 rounded-xl border border-indigo-500/20 bg-indigo-500/[0.04] hover:bg-indigo-500/[0.08] hover:border-indigo-500/30 transition-all duration-200 text-left active:scale-[0.99] mb-6"
+          className="w-full group flex items-center gap-4 p-4 rounded-xl border border-indigo-500/20 bg-indigo-500/[0.04] hover:bg-indigo-500/[0.08] hover:border-indigo-500/30 transition-all duration-200 text-left active:scale-[0.99] mb-6 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0b]"
         >
           <div className="w-10 h-10 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center group-hover:bg-indigo-500/20 transition-colors shrink-0">
             <Upload size={18} className="text-indigo-400" />
@@ -126,12 +126,12 @@ export default function WelcomeScreen({ onNewScan }: WelcomeScreenProps) {
 
         {/* Contextual hint */}
         {sessions.length > 0 ? (
-          <div className="flex items-center gap-2 text-xs text-zinc-600">
+          <div className="flex items-center gap-2 text-xs text-zinc-500">
             <ArrowLeft size={12} />
             <span>Select a session from the sidebar to view it</span>
           </div>
         ) : (
-          <p className="text-sm text-zinc-600">No sessions yet. Start a new scan to begin.</p>
+          <p className="text-sm text-zinc-500">No sessions yet. Start a new scan to begin.</p>
         )}
       </div>
     </div>

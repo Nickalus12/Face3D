@@ -48,7 +48,8 @@ export default function Sidebar({ activeView, onViewChange }: SidebarProps) {
             <div key={item.id} className="relative group w-full flex justify-center">
               <button
                 onClick={() => setActive(item.id)}
-                className={`relative p-3 rounded-lg transition-all duration-200 group-active:scale-90 ${
+                aria-label={item.label}
+                className={`relative p-3 rounded-lg transition-all duration-200 group-active:scale-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08080a] ${
                   isActive
                     ? 'bg-indigo-500/15 text-indigo-400 shadow-[0_0_16px_rgba(99,102,241,0.12)]'
                     : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.05]'
@@ -58,7 +59,7 @@ export default function Sidebar({ activeView, onViewChange }: SidebarProps) {
               </button>
 
               {/* Tooltip */}
-              <div className="absolute left-[72px] top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-[#1c1c1f] text-zinc-100 text-xs font-medium tracking-wide rounded-md opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 pointer-events-none transition-all duration-200 delay-200 z-50 whitespace-nowrap shadow-xl shadow-black/30 border border-white/10 flex items-center gap-2">
+              <div className="absolute left-[72px] top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-[#1c1c1f] text-zinc-100 text-xs font-medium tracking-wide rounded-md opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 -translate-x-2 group-hover:translate-x-0 group-focus-within:translate-x-0 pointer-events-none transition-all duration-200 delay-200 z-50 whitespace-nowrap shadow-xl shadow-black/30 border border-white/10 flex items-center gap-2">
                 {item.label}
                 {item.shortcut && (
                   <span className="text-zinc-500 text-[9px] font-mono">{item.shortcut}</span>
@@ -77,7 +78,8 @@ export default function Sidebar({ activeView, onViewChange }: SidebarProps) {
         <div className="relative group w-full flex justify-center">
           <button
             onClick={() => setActive('settings')}
-            className={`relative p-3 rounded-lg transition-all duration-200 active:scale-90 ${
+            aria-label="Settings"
+            className={`relative p-3 rounded-lg transition-all duration-200 active:scale-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08080a] ${
               active === 'settings'
                 ? 'bg-indigo-500/15 text-indigo-400 shadow-[0_0_16px_rgba(99,102,241,0.12)]'
                 : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.05]'
@@ -85,7 +87,7 @@ export default function Sidebar({ activeView, onViewChange }: SidebarProps) {
           >
             <Settings size={20} strokeWidth={active === 'settings' ? 2.5 : 1.8} />
           </button>
-          <div className="absolute left-[72px] top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-[#1c1c1f] text-zinc-100 text-xs font-medium tracking-wide rounded-md opacity-0 group-hover:opacity-100 -translate-x-2 group-hover:translate-x-0 pointer-events-none transition-all duration-200 delay-200 z-50 whitespace-nowrap shadow-xl shadow-black/30 border border-white/10">
+          <div className="absolute left-[72px] top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-[#1c1c1f] text-zinc-100 text-xs font-medium tracking-wide rounded-md opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 -translate-x-2 group-hover:translate-x-0 group-focus-within:translate-x-0 pointer-events-none transition-all duration-200 delay-200 z-50 whitespace-nowrap shadow-xl shadow-black/30 border border-white/10">
             Settings
           </div>
         </div>

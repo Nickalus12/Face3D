@@ -23,12 +23,19 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
 
   const { sessions, currentSession, selectSession } = useSessionStore();
 
-  // ── Context menu close on outside click ──────────────────
+  // ── Context menu close on outside click or Escape ──────
   useEffect(() => {
     if (!contextMenu) return;
     const handleClick = () => setContextMenu(null);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setContextMenu(null);
+    };
     window.addEventListener("click", handleClick);
-    return () => window.removeEventListener("click", handleClick);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("click", handleClick);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
   }, [contextMenu]);
 
   // ── Handlers ───────────────────────────────────────────────
@@ -64,7 +71,8 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           placeholder="Search sessions..."
-          className="w-full bg-zinc-800/50 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500/30 transition-colors"
+          aria-label="Search sessions"
+          className="w-full bg-zinc-800/50 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40 focus-visible:ring-offset-1 focus-visible:ring-offset-[#0a0a0b] transition-colors"
         />
       </div>
 
@@ -80,15 +88,18 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
           filteredSessions.map((session) => {
             const isSelected = currentSession?.id === session.id;
             const complete = isComplete(session);
+            const isContextTarget = contextMenu?.sessionId === session.id;
 
             return (
-              <div
+              <button
                 key={session.id}
                 onClick={() => selectSession(session)}
                 onContextMenu={(e) => handleContextMenu(e, session.id)}
-                className={`flex items-center gap-2.5 px-3 py-2 cursor-pointer transition-colors duration-100 ${
+                className={`w-full flex items-center gap-2.5 px-3 py-2 cursor-pointer transition-colors duration-100 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500/40 ${
                   isSelected
                     ? "bg-indigo-500/10 text-white border-l-2 border-l-indigo-500"
+                    : isContextTarget
+                    ? "bg-white/[0.05] text-zinc-300 border-l-2 border-l-transparent"
                     : "text-zinc-400 hover:bg-zinc-800/40 border-l-2 border-l-transparent"
                 }`}
               >
@@ -100,7 +111,7 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
                 />
                 {/* Session name */}
                 <span className="text-sm truncate">{session.name}</span>
-              </div>
+              </button>
             );
           })
         )}
