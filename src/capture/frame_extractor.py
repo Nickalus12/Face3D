@@ -534,6 +534,12 @@ def extract_frames_motion_based(
 
     # --- Pass 1 (optional): scene-change keyframe extraction via ffmpeg ---
     scene_frames_saved = 0
+    # When scene_change_only is True, skip the scene detection pass entirely
+    # and go straight to uniform extraction. Scene detection is useless for
+    # smooth face orbit videos (finds 0 scenes) and wastes a full video decode.
+    if scene_change_only and scene_change_prefill:
+        scene_change_prefill = False
+        logger.info("Skipping scene-change pass (scene_change_only=True, using uniform extraction directly)")
     if scene_change_prefill:
         scene_dir = output_dir / "_scene_change_pass"
         scene_dir.mkdir(parents=True, exist_ok=True)
@@ -579,7 +585,7 @@ def extract_frames_motion_based(
         scene_files = sorted(scene_dir.glob("scene_*.png"))
         for sf in scene_files:
             dest = output_dir / f"frame_{scene_frames_saved:06d}.png"
-            sf.rename(dest)
+            sf.replace(dest)
             scene_frames_saved += 1
 
         # Clean up temp dir
@@ -663,7 +669,7 @@ def extract_frames_motion_based(
                 supp_files = sorted(supp_dir.glob("supp_*.png"))
                 for sf in supp_files:
                     dest = output_dir / f"frame_{scene_frames_saved:06d}.png"
-                    sf.rename(dest)
+                    sf.replace(dest)
                     scene_frames_saved += 1
                 try:
                     supp_dir.rmdir()
