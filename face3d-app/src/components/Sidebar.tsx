@@ -1,15 +1,15 @@
 import { useState, useCallback } from 'react';
-import { Home, GitMerge, Box, BarChart2, Image as ImageIcon, Settings } from 'lucide-react';
+import { Home, Workflow, Cuboid, Images, ChartLine, Settings } from 'lucide-react';
 import usePipelineStore from '../store/pipelineStore';
 
 export type ViewId = 'home' | 'pipeline' | 'view' | 'metrics' | 'gallery' | 'settings';
 
 const NAV_ITEMS: { id: ViewId; icon: typeof Home; label: string; shortcut: string }[] = [
   { id: 'home', icon: Home, label: 'Dashboard', shortcut: 'Ctrl+1' },
-  { id: 'pipeline', icon: GitMerge, label: 'Pipeline', shortcut: 'Ctrl+2' },
-  { id: 'view', icon: Box, label: '3D View', shortcut: 'Ctrl+3' },
-  { id: 'gallery', icon: ImageIcon, label: 'Gallery', shortcut: 'Ctrl+4' },
-  { id: 'metrics', icon: BarChart2, label: 'Metrics', shortcut: 'Ctrl+5' },
+  { id: 'pipeline', icon: Workflow, label: 'Pipeline', shortcut: 'Ctrl+2' },
+  { id: 'view', icon: Cuboid, label: '3D View', shortcut: 'Ctrl+3' },
+  { id: 'gallery', icon: Images, label: 'Gallery', shortcut: 'Ctrl+4' },
+  { id: 'metrics', icon: ChartLine, label: 'Metrics', shortcut: 'Ctrl+5' },
 ];
 
 interface SidebarProps {
@@ -28,84 +28,62 @@ export default function Sidebar({ activeView, onViewChange }: SidebarProps) {
     [onViewChange],
   );
 
-  const { gpuInfo } = usePipelineStore();
-  const utilization = gpuInfo?.utilization ? parseInt(gpuInfo.utilization, 10) : 0;
+  const { status } = usePipelineStore();
+  const isRunning = status === 'running';
 
   return (
-    <div className="w-[68px] h-full bg-[#08080a] border-r border-border flex flex-col items-center py-5 z-50 shrink-0 relative">
-      {/* App Logo */}
-      <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 via-purple-500 to-indigo-600 rounded-card flex items-center justify-center shadow-lg shadow-indigo-500/20 mb-8 cursor-pointer hover:scale-105 active:scale-95 transition-all duration-300 ring-1 ring-white/10">
-        <span className="text-white font-black text-xs tracking-tight">F3D</span>
-      </div>
-
-      {/* Main Navigation */}
-      <nav className="flex-1 flex flex-col gap-5 w-full items-center">
+    <div className="w-[56px] h-full bg-[#08080a] border-r border-zinc-800/30 flex flex-col items-center py-4 z-50 shrink-0">
+      {/* Navigation */}
+      <nav className="flex-1 flex flex-col gap-3 w-full items-center pt-2">
         {NAV_ITEMS.map((item) => {
           const isActive = active === item.id;
           const Icon = item.icon;
+          const showPulse = item.id === 'pipeline' && isRunning;
 
           return (
             <div key={item.id} className="relative group w-full flex justify-center">
               <button
                 onClick={() => setActive(item.id)}
                 aria-label={item.label}
-                className={`relative p-3 rounded-lg transition-all duration-200 group-active:scale-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08080a] ${
+                className={`relative p-2.5 rounded-lg transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 ${
                   isActive
-                    ? 'bg-indigo-500/15 text-indigo-400 shadow-[0_0_16px_rgba(99,102,241,0.12)]'
-                    : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.05]'
+                    ? 'bg-indigo-500/15 text-white'
+                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/40'
                 }`}
               >
-                <Icon size={20} strokeWidth={isActive ? 2.5 : 1.8} />
+                <Icon size={18} strokeWidth={isActive ? 2.2 : 1.6} />
+                {showPulse && (
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-indigo-500 rounded-full animate-pulse" />
+                )}
               </button>
 
               {/* Tooltip */}
-              <div className="absolute left-[72px] top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-[#1c1c1f] text-zinc-100 text-xs font-medium tracking-wide rounded-md opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 -translate-x-2 group-hover:translate-x-0 group-focus-within:translate-x-0 pointer-events-none transition-all duration-200 delay-200 z-50 whitespace-nowrap shadow-xl shadow-black/30 border border-white/10 flex items-center gap-2">
+              <div className="absolute left-[60px] top-1/2 -translate-y-1/2 px-2 py-1 bg-zinc-900 text-zinc-200 text-xs rounded-md opacity-0 group-hover:opacity-100 -translate-x-1 group-hover:translate-x-0 pointer-events-none transition-all duration-150 delay-150 z-50 whitespace-nowrap shadow-lg border border-zinc-800">
                 {item.label}
-                {item.shortcut && (
-                  <span className="text-zinc-500 text-[9px] font-mono">{item.shortcut}</span>
-                )}
               </div>
             </div>
           );
         })}
       </nav>
 
-      {/* Bottom: Settings + GPU */}
-      <div className="w-full flex flex-col items-center gap-5 mt-auto">
-        <div className="w-6 h-px bg-white/5" />
-
-        {/* Settings */}
+      {/* Settings at bottom */}
+      <div className="w-full flex flex-col items-center">
         <div className="relative group w-full flex justify-center">
           <button
             onClick={() => setActive('settings')}
             aria-label="Settings"
-            className={`relative p-3 rounded-lg transition-all duration-200 active:scale-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#08080a] ${
+            className={`p-2.5 rounded-lg transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 ${
               active === 'settings'
-                ? 'bg-indigo-500/15 text-indigo-400 shadow-[0_0_16px_rgba(99,102,241,0.12)]'
-                : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.05]'
+                ? 'bg-indigo-500/15 text-white'
+                : 'text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800/40'
             }`}
           >
-            <Settings size={20} strokeWidth={active === 'settings' ? 2.5 : 1.8} />
+            <Settings size={18} strokeWidth={active === 'settings' ? 2.2 : 1.6} />
           </button>
-          <div className="absolute left-[72px] top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-[#1c1c1f] text-zinc-100 text-xs font-medium tracking-wide rounded-md opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 -translate-x-2 group-hover:translate-x-0 group-focus-within:translate-x-0 pointer-events-none transition-all duration-200 delay-200 z-50 whitespace-nowrap shadow-xl shadow-black/30 border border-white/10">
+          <div className="absolute left-[60px] top-1/2 -translate-y-1/2 px-2 py-1 bg-zinc-900 text-zinc-200 text-xs rounded-md opacity-0 group-hover:opacity-100 -translate-x-1 group-hover:translate-x-0 pointer-events-none transition-all duration-150 delay-150 z-50 whitespace-nowrap shadow-lg border border-zinc-800">
             Settings
           </div>
         </div>
-
-        {/* Simplified GPU indicator */}
-        {gpuInfo && (
-          <div
-            className={`text-[10px] font-semibold tabular-nums pb-1 ${
-              utilization > 80
-                ? 'text-red-400'
-                : utilization > 50
-                ? 'text-amber-400'
-                : 'text-zinc-600'
-            }`}
-          >
-            GPU {utilization}%
-          </div>
-        )}
       </div>
     </div>
   );
