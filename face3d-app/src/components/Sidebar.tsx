@@ -63,12 +63,12 @@ export default function Sidebar({ activeView, onViewChange }: SidebarProps) {
     <>
     <div className="w-[60px] h-full bg-[#08080a] border-r border-zinc-800/50 flex flex-col items-center py-4 z-50 shrink-0 relative">
       {/* App Logo */}
-      <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 via-purple-500 to-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/20 mb-5 cursor-pointer hover:scale-105 active:scale-95 transition-all duration-300 ring-1 ring-white/10">
+      <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 via-purple-500 to-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/20 mb-8 cursor-pointer hover:scale-105 active:scale-95 transition-all duration-300 ring-1 ring-white/10">
         <span className="text-white font-black text-[10px] tracking-tight">F3D</span>
       </div>
 
       {/* New Scan Button */}
-      <div className="relative group w-full flex justify-center mb-4">
+      <div className="relative group w-full flex justify-center mb-5">
         <button
           onClick={() => setWizardOpen(true)}
           className="p-2.5 rounded-xl bg-indigo-600/20 text-indigo-400 hover:bg-indigo-600/30 hover:text-indigo-300 border border-indigo-500/20 hover:border-indigo-500/40 transition-all duration-200 group-active:scale-90 shadow-lg shadow-indigo-500/10"
@@ -81,7 +81,7 @@ export default function Sidebar({ activeView, onViewChange }: SidebarProps) {
       </div>
 
       {/* Divider after New Scan */}
-      <div className="w-7 h-px bg-zinc-700/40 mb-4" />
+      <div className="w-7 h-px bg-zinc-700/40 mb-5" />
 
       {/* Main Navigation */}
       <nav className="flex-1 flex flex-col gap-2.5 w-full items-center">
