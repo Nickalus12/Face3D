@@ -29,6 +29,21 @@ function formatRelativeTime(dateStr?: string): string {
   } catch { return ""; }
 }
 
+function formatDateTime(dateStr?: string): string {
+  if (!dateStr) return "";
+  try {
+    const d = new Date(dateStr);
+    const now = new Date();
+    const isToday = d.toDateString() === now.toDateString();
+    const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    if (isToday) return `Today ${time}`;
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (d.toDateString() === yesterday.toDateString()) return `Yesterday ${time}`;
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + ` ${time}`;
+  } catch { return ""; }
+}
+
 function formatSize(bytes?: number): string {
   if (!bytes || bytes === 0) return "";
   if (bytes < 1048576) return `${(bytes / 1024).toFixed(0)}K`;
@@ -202,7 +217,11 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({ isExpanded = true }) =
                     <span>Pending</span>
                   )}
                   {size && <span>· {size}</span>}
-                  {time && <span className="ml-auto">{time}</span>}
+                  {session.created_at && (
+                    <span className="ml-auto" title={session.created_at}>
+                      {formatDateTime(session.created_at)}
+                    </span>
+                  )}
                 </div>
               </button>
             );
