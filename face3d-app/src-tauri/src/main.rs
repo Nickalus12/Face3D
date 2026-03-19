@@ -46,6 +46,7 @@ fn main() {
             commands::config::get_python_info,
             commands::config::get_system_info,
             commands::config::open_folder,
+            commands::config::scan_content_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

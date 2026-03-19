@@ -178,3 +178,60 @@ pub async fn open_folder(path: String) -> AppResult<()> {
         .map_err(|e| AppError::System(format!("Failed to open folder: {}", e)))?;
     Ok(())
 }
+
+/// Scan a content directory and return file counts by type.
+#[command]
+pub async fn scan_content_dir(path: String) -> AppResult<serde_json::Value> {
+    let dir = Path::new(&path);
+    if !dir.exists() || !dir.is_dir() {
+        return Err(AppError::NotFound(format!("Directory not found: {}", path)));
+    }
+
+    let mut videos = 0u32;
+    let mut photos_jpg = 0u32;
+    let mut photos_dng = 0u32;
+    let mut sensor_logs = 0u32;
+    let mut total_bytes = 0u64;
+
+    let entries = fs::read_dir(dir)
+        .map_err(|e| AppError::System(format!("Failed to read directory: {}", e)))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        total_bytes += size;
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        match ext.as_str() {
+            "mp4" | "mov" | "avi" | "mkv" => videos += 1,
+            "jpg" | "jpeg" | "png" | "tif" | "tiff" => photos_jpg += 1,
+            "dng" | "arw" | "cr2" | "nef" => photos_dng += 1,
+            "zip" => sensor_logs += 1,
+            _ => {}
+        }
+    }
+
+    let total_size = if total_bytes > 1_073_741_824 {
+        format!("{:.1} GB", total_bytes as f64 / 1_073_741_824.0)
+    } else {
+        format!("{:.0} MB", total_bytes as f64 / 1_048_576.0)
+    };
+
+    Ok(serde_json::json!({
+        "videos": videos,
+        "photos_jpg": photos_jpg,
+        "photos_dng": photos_dng,
+        "photos": photos_jpg + photos_dng,
+        "sensor_logs": sensor_logs,
+        "total_bytes": total_bytes,
+        "total_size": total_size,
+    }))
+}

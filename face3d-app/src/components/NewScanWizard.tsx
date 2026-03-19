@@ -18,6 +18,7 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import { selectContentDir } from "../lib/tauri";
+import { invoke } from "@tauri-apps/api/core";
 import usePipelineStore from "../store/pipelineStore";
 import useSessionStore from "../store/sessionStore";
 import useToastStore from "../store/toastStore";
@@ -40,9 +41,9 @@ interface AdvancedConfig {
 }
 
 const PRESET_DEFAULTS: Record<QualityPreset, AdvancedConfig> = {
-  quick: { iterations: 5000, maxGaussians: 500_000, resolution: 1024 },
-  balanced: { iterations: 15000, maxGaussians: 1_500_000, resolution: 2048 },
-  maximum: { iterations: 30000, maxGaussians: 3_000_000, resolution: 4096 },
+  quick: { iterations: 1000, maxGaussians: 150_000, resolution: 1024 },
+  balanced: { iterations: 3000, maxGaussians: 300_000, resolution: 2048 },
+  maximum: { iterations: 7000, maxGaussians: 500_000, resolution: 4096 },
 };
 
 const PRESET_META: Record<
@@ -52,20 +53,20 @@ const PRESET_META: Record<
   quick: {
     label: "Quick",
     icon: Zap,
-    description: "Fast preview, lower detail",
-    time: "~15 min",
+    description: "Fast preview — fewer Gaussians, lower res",
+    time: "~5 min",
   },
   balanced: {
     label: "Balanced",
     icon: Scale,
-    description: "Good quality, reasonable time",
-    time: "~45 min",
+    description: "Best quality/speed tradeoff",
+    time: "~10 min",
   },
   maximum: {
     label: "Maximum",
     icon: Crown,
-    description: "Highest fidelity output",
-    time: "~2 hours",
+    description: "Highest fidelity — more iterations, full resolution",
+    time: "~25 min",
   },
 };
 
@@ -99,13 +100,30 @@ const NewScanWizard: React.FC<NewScanWizardProps> = ({ isOpen, onClose }) => {
     const dir = await selectContentDir();
     if (dir) {
       setContentDir(dir);
-      // Simulate file detection (in real app, invoke Tauri command to scan dir)
-      setDetectedFiles({
-        videos: 1,
-        photos: 0,
-        sensorLogs: 1,
-        totalSize: "2.4 GB",
-      });
+      // Actually scan the directory for content files
+      try {
+        const result = await invoke<{
+          videos: number;
+          photos: number;
+          photos_dng: number;
+          sensor_logs: number;
+          total_size: string;
+        }>("scan_content_dir", { path: dir });
+        setDetectedFiles({
+          videos: result.videos,
+          photos: result.photos,
+          sensorLogs: result.sensor_logs,
+          totalSize: result.total_size,
+        });
+        // Auto-generate a friendlier session name from folder name
+        const folderName = dir.split(/[/\\]/).filter(Boolean).pop() ?? "";
+        if (folderName && folderName !== "New") {
+          setSessionName(folderName.toLowerCase().replace(/\s+/g, "_"));
+        }
+      } catch {
+        // Fallback if scan fails
+        setDetectedFiles({ videos: 0, photos: 0, sensorLogs: 0, totalSize: "Unknown" });
+      }
     }
   }, []);
 
@@ -118,20 +136,24 @@ const NewScanWizard: React.FC<NewScanWizardProps> = ({ isOpen, onClose }) => {
     setIsDragOver(false);
   }, []);
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-    // Tauri file drops provide paths
     const items = e.dataTransfer.files;
     if (items.length > 0) {
       const path = (items[0] as any).path ?? items[0].name;
       setContentDir(path);
-      setDetectedFiles({
-        videos: 1,
-        photos: 0,
-        sensorLogs: 1,
-        totalSize: "2.4 GB",
-      });
+      try {
+        const result = await invoke<{
+          videos: number; photos: number; sensor_logs: number; total_size: string;
+        }>("scan_content_dir", { path });
+        setDetectedFiles({
+          videos: result.videos, photos: result.photos,
+          sensorLogs: result.sensor_logs, totalSize: result.total_size,
+        });
+      } catch {
+        setDetectedFiles({ videos: 0, photos: 0, sensorLogs: 0, totalSize: "Unknown" });
+      }
     }
   }, []);
 
