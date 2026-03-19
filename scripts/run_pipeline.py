@@ -9,6 +9,7 @@ Usage:
     python scripts/run_pipeline.py --video path/to/video.mp4 --session my_session
     python scripts/run_pipeline.py --session my_session --start-stage 4  # Resume from stage 4
     python scripts/run_pipeline.py --config config/pipeline.yaml --video path/to/video.mp4
+    python scripts/run_pipeline.py --content-dir content/New  # Auto-detect all inputs
 """
 
 import argparse
@@ -111,7 +112,10 @@ def validate_config(config: dict, video_paths: list[Path]):
 
 
 def setup_session(config: dict, session_id: str | None, video_paths: list[str]) -> dict:
-    """Create session directory structure and return session info."""
+    """Create session directory structure and return session info.
+
+    Creates the full professional folder layout under data/{raw,processed,output}/{session}/.
+    """
     if session_id is None:
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -121,15 +125,32 @@ def setup_session(config: dict, session_id: str | None, video_paths: list[str]) 
     out_dir = data_root / "output" / session_id
 
     for d in [
-        raw_dir,
+        # Raw input structure
+        raw_dir / "video",
+        raw_dir / "photos" / "wide" / "dng",
+        raw_dir / "photos" / "wide" / "jpg",
+        raw_dir / "photos" / "main" / "dng",
+        raw_dir / "photos" / "main" / "jpg",
+        raw_dir / "photos" / "other",
+        raw_dir / "sensors" / "video_synced",
+        raw_dir / "sensors" / "photo_session",
+        # Processed structure
         proc_dir / "frames",
         proc_dir / "frames_srgb",
+        proc_dir / "photos" / "wide_processed",
+        proc_dir / "photos" / "main_quarter",
+        proc_dir / "photos" / "main_fullres",
+        proc_dir / "photos" / "main_face_crops",
+        proc_dir / "sensors",
         proc_dir / "depth",
+        proc_dir / "depth_aligned",
         proc_dir / "colmap" / "sparse",
         proc_dir / "landmarks",
         proc_dir / "face_masks",
         proc_dir / "flame",
+        # Output structure
         out_dir / "renders",
+        out_dir / "animations",
         out_dir / "previews",
     ]:
         d.mkdir(parents=True, exist_ok=True)
@@ -398,6 +419,400 @@ def _run_da3_unified_stage(config: dict, session: dict) -> bool:
 # Pipeline stages
 # ---------------------------------------------------------------------------
 
+def _organize_raw_folder(session: dict) -> None:
+    """Create professional folder structure under data/raw/{session}/ and
+    copy source files into it.
+
+    Structure:
+        data/raw/{session}/
+        +-- video/                  # Source video files
+        +-- photos/
+        |   +-- wide/dng/           # Wide lens Expert RAW
+        |   +-- wide/jpg/
+        |   +-- main/dng/           # 200MP main sensor
+        |   +-- main/jpg/
+        |   +-- other/
+        +-- sensors/
+        |   +-- video_synced/       # Sensor log matched to video
+        |   +-- photo_session/      # Sensor log during photo capture
+        +-- session_manifest.json
+    """
+    raw_dir = session["raw_dir"]
+
+    # Create subdirectories
+    dirs = {
+        "video": raw_dir / "video",
+        "photos_wide_dng": raw_dir / "photos" / "wide" / "dng",
+        "photos_wide_jpg": raw_dir / "photos" / "wide" / "jpg",
+        "photos_main_dng": raw_dir / "photos" / "main" / "dng",
+        "photos_main_jpg": raw_dir / "photos" / "main" / "jpg",
+        "photos_other": raw_dir / "photos" / "other",
+        "sensors_video": raw_dir / "sensors" / "video_synced",
+        "sensors_photo": raw_dir / "sensors" / "photo_session",
+    }
+    for d in dirs.values():
+        d.mkdir(parents=True, exist_ok=True)
+
+    # Copy video files
+    for vp in session["video_paths"]:
+        dst = dirs["video"] / vp.name
+        if not dst.exists():
+            shutil.copy2(vp, dst)
+            log.info("  Copied video: %s", vp.name)
+
+    # Copy photos (will be classified by lens after EXIF analysis)
+    for pp in session.get("photo_paths", []):
+        pp = Path(pp)
+        suffix = pp.suffix.lower()
+        # Temporarily copy to 'other' — stage 0 will reclassify after EXIF
+        dst = dirs["photos_other"] / pp.name
+        if not dst.exists():
+            shutil.copy2(pp, dst)
+
+    # Copy sensor logs
+    for sp in session.get("sensor_log_paths", []):
+        sp = Path(sp)
+        dst = dirs["sensors_video"] / sp.name
+        if not dst.exists():
+            shutil.copy2(sp, dst)
+            log.info("  Copied sensor log: %s", sp.name)
+
+
+def _reclassify_photos_to_raw(session: dict, manifest: dict) -> None:
+    """Move photos from other/ into the correct lens subdirectory under raw/.
+
+    Uses the lens classification from the manifest produced by
+    organize_capture_session.
+    """
+    raw_dir = session["raw_dir"]
+    photos_other = raw_dir / "photos" / "other"
+
+    lens_dir_map = {
+        "wide_23mm": "wide",
+        "main_200mp": "main",
+        "ultrawide_13mm": "other",
+        "telephoto_70mm": "other",
+        "supertelephoto_200mm": "other",
+        "unknown": "other",
+    }
+
+    for lens_name, photo_list in manifest.get("photos", {}).items():
+        subdir = lens_dir_map.get(lens_name, "other")
+        for entry in photo_list:
+            stem = entry.get("stem", "")
+            for ext_key, ext_subdir in [("dng", "dng"), ("jpg", "jpg")]:
+                src_path = entry.get(ext_key)
+                if src_path is None:
+                    continue
+                src = Path(src_path)
+                # File might be in 'other' from initial copy, or still at original
+                other_copy = photos_other / src.name
+                target_dir = raw_dir / "photos" / subdir / ext_subdir
+                target_dir.mkdir(parents=True, exist_ok=True)
+                dst = target_dir / src.name
+                if dst.exists():
+                    continue
+                if other_copy.exists():
+                    shutil.move(str(other_copy), str(dst))
+                elif src.exists():
+                    shutil.copy2(src, dst)
+
+
+def _compute_capture_quality_score(manifest: dict) -> dict:
+    """Compute a 0-100 capture quality score based on available data.
+
+    Scores are based on:
+    - Video duration and resolution (0-20)
+    - Photo count and resolution mix (0-25)
+    - Sensor data availability (0-20)
+    - Multi-lens coverage (0-15)
+    - Lighting sensor availability for consistency check (0-10)
+    - Overall data richness bonus (0-10)
+
+    Returns dict with total_score, breakdown, and assessment string.
+    """
+    breakdown = {}
+    total = 0
+
+    # --- Video quality (0-20) ---
+    video = manifest.get("video", {})
+    video_score = 0
+    dur = video.get("duration", 0)
+    res = video.get("resolution", [0, 0])
+    if dur > 0:
+        video_score += min(5, dur / 6)  # 30s = 5pts
+        pixels = res[0] * res[1]
+        if pixels >= 7680 * 4320:  # 8K
+            video_score += 10
+        elif pixels >= 3840 * 2160:  # 4K
+            video_score += 7
+        elif pixels >= 1920 * 1080:  # 1080p
+            video_score += 4
+        fps = video.get("fps", 0)
+        if fps >= 60:
+            video_score += 5
+        elif fps >= 30:
+            video_score += 3
+    breakdown["video"] = round(min(20, video_score), 1)
+    total += breakdown["video"]
+
+    # --- Photo quality (0-25) ---
+    photos = manifest.get("photos", {})
+    n_total_photos = sum(len(v) for v in photos.values())
+    n_200mp = len(photos.get("main_200mp", []))
+    photo_score = 0
+    if n_total_photos > 0:
+        photo_score += min(10, n_total_photos)  # 10 photos = 10pts
+        # 200MP bonus
+        if n_200mp > 0:
+            photo_score += min(10, n_200mp * 2)  # 5 200MP photos = 10pts
+        # Wide-lens photos
+        n_wide = len(photos.get("wide_23mm", []))
+        if n_wide > 0:
+            photo_score += min(5, n_wide)
+    breakdown["photos"] = round(min(25, photo_score), 1)
+    total += breakdown["photos"]
+
+    # --- Sensor data (0-20) ---
+    sensors = manifest.get("sensors", {})
+    sensor_score = 0
+    if sensors.get("video_synced"):
+        sensor_score += 5  # Has a synced sensor log
+    for key in ("accelerometer_hz", "gyroscope_hz", "orientation_hz"):
+        if sensors.get(key, 0) > 0:
+            sensor_score += 3
+    if sensors.get("has_gps"):
+        sensor_score += 3
+    if sensors.get("has_light"):
+        sensor_score += 3
+    breakdown["sensors"] = round(min(20, sensor_score), 1)
+    total += breakdown["sensors"]
+
+    # --- Multi-lens coverage (0-15) ---
+    n_lenses = len(photos)
+    lens_score = min(15, n_lenses * 5)
+    breakdown["multi_lens"] = round(lens_score, 1)
+    total += breakdown["multi_lens"]
+
+    # --- Lighting consistency (0-10) ---
+    # This will be refined in Stage 4 when light sensor data is parsed
+    light_score = 5 if sensors.get("has_light") else 0
+    breakdown["lighting"] = round(min(10, light_score), 1)
+    total += breakdown["lighting"]
+
+    # --- Data richness bonus (0-10) ---
+    richness = 0
+    if n_total_photos > 0 and dur > 0:
+        richness += 3  # Both video and photos
+    if sensors.get("video_synced") and n_total_photos > 0:
+        richness += 3  # Sensors + photos
+    if n_200mp > 0 and sensors.get("video_synced"):
+        richness += 4  # Full pipeline data
+    breakdown["richness"] = round(min(10, richness), 1)
+    total += breakdown["richness"]
+
+    total = round(min(100, total), 1)
+
+    # Assessment string
+    if total >= 85:
+        assessment = f"Excellent ({total}/100) — full multi-source capture"
+    elif total >= 65:
+        assessment = f"Good ({total}/100) — solid data for reconstruction"
+    elif total >= 40:
+        assessment = f"Fair ({total}/100) — reconstruction possible but may lack detail"
+    elif total >= 20:
+        assessment = f"Minimal ({total}/100) — consider adding photos or sensor data"
+    else:
+        assessment = f"Basic ({total}/100) — video-only capture, limited quality"
+
+    return {
+        "total_score": total,
+        "breakdown": breakdown,
+        "assessment": assessment,
+    }
+
+
+def stage_0_organize_inputs(config: dict, session: dict) -> bool:
+    """Stage 0: Organize multi-source inputs (video, photos, sensor logs).
+
+    Creates a professional folder structure under data/raw/{session}/,
+    classifies photos by lens, matches sensor logs to video, validates
+    temporal overlap, creates multi-resolution outputs for 200MP photos,
+    and writes a session_manifest.json.
+    """
+    marker = session["proc_dir"] / ".stage_0_complete"
+    if stage_complete(marker):
+        log.info("Stage 0: Input organization already complete, skipping")
+        # Reload manifest into session
+        manifest_path = session["proc_dir"] / "session_manifest.json"
+        if manifest_path.exists():
+            session["manifest"] = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return True
+
+    photo_paths = session.get("photo_paths", [])
+    sensor_log_paths = session.get("sensor_log_paths", [])
+
+    # Skip if no multi-source data
+    if not photo_paths and not sensor_log_paths:
+        log.info("Stage 0: No photos or sensor logs provided, skipping organization")
+        session["manifest"] = None
+        mark_stage_complete(marker)
+        return True
+
+    log.info("Stage 0: Organizing multi-source capture data...")
+
+    # Step 1: Create professional folder structure and copy source files
+    _organize_raw_folder(session)
+
+    from capture.data_organizer import (
+        organize_capture_session,
+        compute_multi_lens_camera_models,
+        estimate_photo_timestamps,
+    )
+
+    # Step 2: Classify and create manifest
+    manifest = organize_capture_session(
+        video_paths=[str(v) for v in session["video_paths"]],
+        photo_paths=[str(p) for p in photo_paths],
+        sensor_log_paths=[str(s) for s in sensor_log_paths],
+        output_dir=session["proc_dir"],
+    )
+    session["manifest"] = manifest
+
+    # Step 3: Reclassify photos into lens-specific raw subdirectories
+    _reclassify_photos_to_raw(session, manifest)
+
+    # Step 4: Match sensor logs to video/photo sessions in raw structure
+    sensors_info = manifest.get("sensors", {})
+    video_synced = sensors_info.get("video_synced")
+    photo_session_sensor = sensors_info.get("photo_session")
+    if video_synced:
+        # Copy the matched sensor log to video_synced/
+        src = Path(video_synced)
+        dst = session["raw_dir"] / "sensors" / "video_synced" / src.name
+        if not dst.exists() and src.exists():
+            shutil.copy2(src, dst)
+    if photo_session_sensor:
+        src = Path(photo_session_sensor)
+        dst = session["raw_dir"] / "sensors" / "photo_session" / src.name
+        if not dst.exists() and src.exists():
+            shutil.copy2(src, dst)
+
+    # Also save the manifest into raw/ for reference
+    raw_manifest_path = session["raw_dir"] / "session_manifest.json"
+    raw_manifest_path.write_text(
+        json.dumps(manifest, indent=2, default=str), encoding="utf-8",
+    )
+
+    # Step 5: Compute camera models for each lens
+    camera_models = compute_multi_lens_camera_models(manifest)
+    session["camera_models"] = camera_models
+
+    cam_models_path = session["proc_dir"] / "camera_models.json"
+    cam_models_path.write_text(
+        json.dumps(camera_models, indent=2, default=str), encoding="utf-8",
+    )
+    log.info("Camera models saved: %s", cam_models_path)
+
+    # Step 6: Estimate photo timestamps relative to video
+    if photo_paths:
+        photo_timestamps = estimate_photo_timestamps(
+            photo_paths=photo_paths,
+            video_start_time=None,  # Will be refined after video metadata is read
+        )
+        ts_path = session["proc_dir"] / "photo_timestamps.json"
+        ts_path.write_text(
+            json.dumps(photo_timestamps, indent=2, default=str), encoding="utf-8",
+        )
+
+    # Step 7: Process 200MP photos into multi-resolution tiers
+    photos_200mp = manifest.get("photos", {}).get("main_200mp", [])
+    if photos_200mp:
+        log.info("Stage 0: Processing %d 200MP photos into multi-resolution tiers...", len(photos_200mp))
+        from capture.multi_res_processor import process_200mp_photos
+
+        # Collect DNG paths (prefer DNG over JPG for 200MP)
+        dng_paths = []
+        for p in photos_200mp:
+            dng = p.get("dng")
+            jpg = p.get("jpg")
+            if dng:
+                dng_paths.append(dng)
+            elif jpg:
+                dng_paths.append(jpg)
+
+        if dng_paths:
+            multi_res_dir = session["proc_dir"] / "photos" / "main_quarter"
+            fullres_dir = session["proc_dir"] / "photos" / "main_fullres"
+            face_crops_dir = session["proc_dir"] / "photos" / "main_face_crops"
+
+            # Configure output tiers to use the professional directory structure
+            multi_res_results = process_200mp_photos(
+                photo_paths=dng_paths,
+                output_dir=session["proc_dir"] / "photos_200mp",
+            )
+            session["multi_res_200mp"] = multi_res_results
+
+            # Also create symlinks/copies in the professional structure
+            for tier_name, tier_dir in [
+                ("full", fullres_dir),
+                ("quarter", multi_res_dir),
+                ("face_crops", face_crops_dir),
+            ]:
+                tier_dir.mkdir(parents=True, exist_ok=True)
+                for entry in multi_res_results.get(tier_name, []):
+                    src = Path(entry["path"])
+                    dst = tier_dir / src.name
+                    if src.exists() and not dst.exists():
+                        shutil.copy2(src, dst)
+
+            log.info(
+                "Stage 0: 200MP processing complete - %d full, %d quarter, %d face crops",
+                len(multi_res_results.get("full", [])),
+                len(multi_res_results.get("quarter", [])),
+                len(multi_res_results.get("face_crops", [])),
+            )
+
+    # Create processed/sensors/ directory structure
+    sensors_proc_dir = session["proc_dir"] / "sensors"
+    sensors_proc_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create processed/photos/ subdirs
+    for subdir in ("wide_processed",):
+        (session["proc_dir"] / "photos" / subdir).mkdir(parents=True, exist_ok=True)
+
+    # Log summary
+    n_wide = len(manifest.get("photos", {}).get("wide_23mm", []))
+    n_main = len(manifest.get("photos", {}).get("main_200mp", []))
+    n_other = sum(
+        len(v) for k, v in manifest.get("photos", {}).items()
+        if k not in ("wide_23mm", "main_200mp")
+    )
+    log.info(
+        "Stage 0: Found %d video(s), %d wide photo(s), %d 200MP photo(s), "
+        "%d other photo(s), %d sensor log(s)",
+        manifest["summary"]["num_videos"],
+        n_wide, n_main, n_other,
+        manifest["summary"]["num_sensor_logs"],
+    )
+
+    # Compute capture quality score
+    quality = _compute_capture_quality_score(manifest)
+    log.info("Stage 0: Capture Quality — %s", quality["assessment"])
+    for category, score in quality["breakdown"].items():
+        if score > 0:
+            log.info("  %s: %.1f pts", category, score)
+
+    # Save quality score
+    quality_path = session["proc_dir"] / "capture_quality.json"
+    quality_path.write_text(
+        json.dumps(quality, indent=2), encoding="utf-8",
+    )
+
+    mark_stage_complete(marker)
+    return True
+
+
 def stage_1_extract_frames(config: dict, session: dict) -> bool:
     """Extract frames from video with motion-based sampling."""
     marker = session["proc_dir"] / ".stage_1_complete"
@@ -441,39 +856,126 @@ def stage_1_extract_frames(config: dict, session: dict) -> bool:
     # --- Process Expert RAW photos if provided ---
     photo_paths = session.get("photo_paths", [])
     photos_cfg = config.get("photos", {})
+    session_manifest = session.get("manifest")
+
     if photo_paths and photos_cfg.get("enabled", True):
         log.info("Stage 1: Processing %d Expert RAW photos...", len(photo_paths))
         from capture.photo_processor import process_photos
 
-        photos_dir = session["proc_dir"] / "photos"
-        processed_photos, photo_metadata = process_photos(
-            photo_paths=photo_paths,
-            output_dir=photos_dir,
-        )
-        session["processed_photo_paths"] = processed_photos
-        session["photo_metadata"] = photo_metadata
-        log.info("Stage 1: Processed %d photos -> %s", len(processed_photos), photos_dir)
+        # If we have a manifest from Stage 0, organize photos by lens
+        if session_manifest and "photos" in session_manifest:
+            # Process wide-lens photos (same lens as video — direct texture anchors)
+            wide_photos = session_manifest["photos"].get("wide_23mm", [])
+            if wide_photos:
+                wide_paths = []
+                for p in wide_photos:
+                    dng = p.get("dng")
+                    jpg = p.get("jpg")
+                    if dng:
+                        wide_paths.append(dng)
+                    elif jpg:
+                        wide_paths.append(jpg)
 
-        # Also copy processed photos into frames_srgb so they are included
+                if wide_paths:
+                    wide_dir = session["proc_dir"] / "photos_wide"
+                    processed_wide, wide_meta = process_photos(
+                        photo_paths=wide_paths,
+                        output_dir=wide_dir,
+                    )
+                    log.info("Stage 1: Processed %d wide-lens photos", len(processed_wide))
+
+            # Process 200MP quarter-res versions (already generated in Stage 0)
+            multi_res = session.get("multi_res_200mp", {})
+            quarter_photos = multi_res.get("quarter", [])
+            if quarter_photos:
+                log.info("Stage 1: %d 200MP quarter-res photos available from Stage 0", len(quarter_photos))
+
+            # Collect all processed photos for downstream
+            all_photo_paths = []
+            all_photo_meta = []
+
+            # Wide-lens photos
+            if wide_photos:
+                wide_dir = session["proc_dir"] / "photos_wide"
+                if wide_dir.exists():
+                    for pp in sorted(wide_dir.glob("photo_*.png")):
+                        all_photo_paths.append(pp)
+
+            # 200MP quarter-res photos
+            quarter_dir = session["proc_dir"] / "photos_200mp" / "quarter"
+            if quarter_dir.exists():
+                for pp in sorted(quarter_dir.glob("*.png")):
+                    all_photo_paths.append(pp)
+
+            session["processed_photo_paths"] = all_photo_paths
+        else:
+            # No manifest — process all photos uniformly (legacy path)
+            photos_dir = session["proc_dir"] / "photos"
+            processed_photos, photo_metadata = process_photos(
+                photo_paths=photo_paths,
+                output_dir=photos_dir,
+            )
+            session["processed_photo_paths"] = processed_photos
+            session["photo_metadata"] = photo_metadata
+            all_photo_paths = processed_photos
+            log.info("Stage 1: Processed %d photos -> %s", len(processed_photos), photos_dir)
+
+        # Copy processed photos into frames_srgb so they are included
         # in downstream stages (DA3, COLMAP, training). Photos are named
         # photo_NNNN.png to distinguish from video frame_NNNNNN.png files.
         srgb_dir = session["proc_dir"] / "frames_srgb"
         srgb_dir.mkdir(parents=True, exist_ok=True)
-        for pp in processed_photos:
+        for pp in all_photo_paths:
             dst = srgb_dir / pp.name
             if not dst.exists():
                 shutil.copy2(pp, dst)
                 log.debug("Copied photo %s to frames_srgb/", pp.name)
 
-        # Save a manifest so downstream stages know which images are photos
-        manifest_path = session["proc_dir"] / "photo_manifest.json"
-        manifest = {
-            "photo_names": [p.name for p in processed_photos],
+        # Save a photo manifest so downstream stages know which images are photos
+        # and their source lens for weighted training
+        photo_manifest_data = {
+            "photo_names": [p.name for p in all_photo_paths],
             "weight": photos_cfg.get("weight", 3.0),
-            "count": len(processed_photos),
+            "count": len(all_photo_paths),
         }
+
+        # If we have multi-source data, add per-lens weight info
+        if session_manifest and "photos" in session_manifest:
+            wide_names = []
+            main_200mp_names = []
+            face_crop_names = []
+
+            wide_dir = session["proc_dir"] / "photos_wide"
+            if wide_dir.exists():
+                wide_names = [f.name for f in sorted(wide_dir.glob("photo_*.png"))]
+
+            quarter_dir = session["proc_dir"] / "photos_200mp" / "quarter"
+            if quarter_dir.exists():
+                main_200mp_names = [f.name for f in sorted(quarter_dir.glob("*.png"))]
+
+            face_crops_dir = session["proc_dir"] / "photos_200mp" / "face_crops"
+            if face_crops_dir.exists():
+                face_crop_names = [f.name for f in sorted(face_crops_dir.glob("*.tiff"))]
+
+            photo_manifest_data["lens_groups"] = {
+                "wide_23mm": {
+                    "names": wide_names,
+                    "weight": 3.0,
+                },
+                "main_200mp": {
+                    "names": main_200mp_names,
+                    "weight": 5.0,
+                },
+            }
+            photo_manifest_data["face_crops"] = {
+                "names": face_crop_names,
+                "dir": str(face_crops_dir) if face_crops_dir.exists() else None,
+                "weight": 5.0,
+            }
+
+        manifest_path = session["proc_dir"] / "photo_manifest.json"
         manifest_path.write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8",
+            json.dumps(photo_manifest_data, indent=2), encoding="utf-8",
         )
         log.info("Photo manifest saved: %s", manifest_path)
     else:
@@ -558,7 +1060,7 @@ def stage_3_filter_frames(config: dict, session: dict) -> bool:
 
 
 def stage_4_parse_sensors(config: dict, session: dict) -> bool:
-    """Parse IMU data from video metadata or sidecar files."""
+    """Parse IMU data from video metadata, sidecar files, or Sensor Logger ZIP."""
     marker = session["proc_dir"] / ".stage_4_complete"
     if stage_complete(marker):
         log.info("Stage 4: Sensor parsing already complete, skipping")
@@ -570,30 +1072,372 @@ def stage_4_parse_sensors(config: dict, session: dict) -> bool:
         mark_stage_complete(marker)
         return True
 
-    log.info("Stage 4: Parsing IMU/sensor data...")
-    from sensors import parse_imu_from_video
+    # -- Check for Sensor Logger ZIP (much richer data with pre-fused orientation) --
+    sensor_log_path = session.get("sensor_log_path")
 
-    for video_path in session["video_paths"]:
+    # Auto-detect: look for .zip files in content/New/ if not explicitly provided
+    if sensor_log_path is None:
+        content_dir = PROJECT_ROOT / "content" / "New"
+        if content_dir.exists():
+            zips = sorted(content_dir.glob("*.zip"))
+            if zips:
+                sensor_log_path = zips[0]
+                log.info("Stage 4: Auto-detected Sensor Logger ZIP: %s", sensor_log_path)
+
+    if sensor_log_path is not None and Path(sensor_log_path).exists():
+        log.info("Stage 4: Parsing Sensor Logger data from %s", sensor_log_path)
+        from sensors.sensor_logger import (
+            parse_sensor_logger_zip,
+            align_sensor_to_video,
+            estimate_camera_trajectory,
+            compute_lighting_profile,
+        )
+
         try:
-            parse_imu_from_video(
-                video_path=video_path,
-                output_path=session["proc_dir"] / "imu_data.npz",
+            import numpy as np
+
+            sensors_dir = session["proc_dir"] / "sensors"
+            sensors_dir.mkdir(parents=True, exist_ok=True)
+
+            npz_path, summary = parse_sensor_logger_zip(
+                zip_path=sensor_log_path,
+                output_dir=sensors_dir,
             )
+            log.info(
+                "Stage 4: Parsed %d sensors, %d total samples",
+                len(summary["sensors"]), summary["total_samples"],
+            )
+
+            # Align sensor data to video frames
+            for video_path in session["video_paths"]:
+                sensor_data = align_sensor_to_video(
+                    sensor_npz_path=npz_path,
+                    video_path=video_path,
+                )
+                session["sensor_logger_data"] = sensor_data
+
+                # Save aligned sensor data to disk for downstream stages
+                aligned_npz_path = sensors_dir / "aligned_sensor_data.npz"
+                aligned_save = {}
+                for key, val in sensor_data.items():
+                    if isinstance(val, np.ndarray):
+                        aligned_save[key] = val
+                    elif isinstance(val, (int, float)):
+                        aligned_save[key] = np.array(val)
+                np.savez_compressed(str(aligned_npz_path), **aligned_save)
+                log.info("Stage 4: Saved aligned sensor data to %s", aligned_npz_path)
+
+                # Analyse camera trajectory
+                if "frame_quaternions" in sensor_data:
+                    trajectory = estimate_camera_trajectory(
+                        orientation_quats=sensor_data["frame_quaternions"],
+                        timestamps=sensor_data["frame_timestamps"],
+                    )
+                    session["trajectory_assessment"] = trajectory
+                    log.info("Stage 4: %s", trajectory["coverage_assessment"])
+
+                    # Save trajectory analysis
+                    traj_path = sensors_dir / "trajectory_analysis.json"
+                    traj_path.write_text(
+                        json.dumps(trajectory, indent=2, default=str),
+                        encoding="utf-8",
+                    )
+
+                # Compute and save lighting profile
+                if "frame_light" in sensor_data:
+                    lighting = compute_lighting_profile(
+                        light_lux=sensor_data["frame_light"],
+                        timestamps=sensor_data["frame_timestamps"],
+                        frame_timestamps=sensor_data["frame_timestamps"],
+                    )
+                    n_outliers = int(lighting["outlier_mask"].sum())
+                    log.info(
+                        "Stage 4: Lighting — median=%.0f lux, range=%.0f-%.0f, %d outlier frames",
+                        lighting["median_lux"],
+                        lighting["lux_range"][0], lighting["lux_range"][1],
+                        n_outliers,
+                    )
+
+                    # Save lighting profile to disk for Stage 13
+                    lighting_npz_path = sensors_dir / "lighting_profile.npz"
+                    np.savez_compressed(
+                        str(lighting_npz_path),
+                        frame_lux=lighting["frame_lux"],
+                        frame_adjustment_factors=lighting["frame_adjustment_factors"],
+                        outlier_mask=lighting["outlier_mask"],
+                        median_lux=np.array(lighting["median_lux"]),
+                        lux_min=np.array(lighting["lux_range"][0]),
+                        lux_max=np.array(lighting["lux_range"][1]),
+                    )
+                    log.info("Stage 4: Saved lighting profile to %s", lighting_npz_path)
+
+            # Mark that we have Sensor Logger data (skip Madgwick in stage 5)
+            (session["proc_dir"] / ".sensor_logger_available").write_text(
+                str(npz_path)
+            )
+
         except Exception as e:
-            log.warning("IMU parsing failed (non-fatal): %s", e)
-            log.info("Continuing without IMU data")
+            log.warning("Sensor Logger parsing failed (non-fatal): %s", e)
+            log.info("Falling back to video-embedded IMU parsing")
+            sensor_log_path = None  # fall through to legacy path
+
+    # -- Legacy: parse IMU from video metadata --
+    if sensor_log_path is None:
+        log.info("Stage 4: Parsing IMU/sensor data from video metadata...")
+        from sensors import parse_imu_from_video
+
+        for video_path in session["video_paths"]:
+            try:
+                parse_imu_from_video(
+                    video_path=video_path,
+                    output_path=session["proc_dir"] / "imu_data.npz",
+                )
+            except Exception as e:
+                log.warning("IMU parsing failed (non-fatal): %s", e)
+                log.info("Continuing without IMU data")
 
     mark_stage_complete(marker)
     return True
 
 
+# ---------------------------------------------------------------------------
+# Stage 5 sensor-derived prior enhancements
+# ---------------------------------------------------------------------------
+
+def _enhance_priors_with_barometer(
+    priors_path: Path,
+    sensor_data: dict,
+    frame_names: list[str],
+) -> None:
+    """Add Y-translation constraints from barometer pressure data.
+
+    Barometer pressure deltas convert to altitude changes
+    (1 hPa ~= 8.43m at sea level).  This is the only translation
+    prior available from sensor data — even gyroscopes cannot
+    provide positional information.
+
+    Rewrites the priors file in-place with tighter TY_STD where
+    barometer data is available.
+    """
+    import numpy as np
+
+    # Load barometer data from the aligned NPZ
+    aligned_npz = priors_path.parent.parent / "sensors" / "aligned_sensor_data.npz"
+    if not aligned_npz.exists():
+        return
+
+    try:
+        data = np.load(str(aligned_npz), allow_pickle=True)
+    except Exception:
+        return
+
+    # Check for barometer in the raw sensor data
+    raw_npz_path = priors_path.parent.parent / "sensors" / "sensor_logger_data.npz"
+    if not raw_npz_path.exists():
+        return
+
+    try:
+        raw = np.load(str(raw_npz_path), allow_pickle=True)
+    except Exception:
+        return
+
+    if "baro_timestamps" not in raw or "baro_pressure" not in raw:
+        return
+
+    baro_t = raw["baro_timestamps"]
+    baro_p = raw["baro_pressure"]
+
+    if len(baro_t) < 2 or len(baro_p) < 2:
+        return
+
+    # Interpolate barometer to frame timestamps
+    frame_t = data.get("frame_timestamps")
+    if frame_t is None or len(frame_t) == 0:
+        return
+
+    t_clamped = np.clip(frame_t, baro_t[0], baro_t[-1])
+    frame_pressure = np.interp(t_clamped, baro_t, baro_p)
+
+    # Convert pressure delta to height (meters)
+    # Pressure decreases with altitude: 1 hPa drop ~= 8.43m rise
+    reference_pressure = frame_pressure[0]
+    height_m = (reference_pressure - frame_pressure) * 8.43
+
+    # Check if there's meaningful height variation (> 2cm)
+    height_range = float(np.ptp(height_m))
+    if height_range < 0.02:
+        log.info("Stage 5: Barometer — negligible height variation (%.1f mm), skipping Y-translation priors",
+                 height_range * 1000)
+        return
+
+    log.info(
+        "Stage 5: Barometer — %.1f cm height variation detected, adding Y-translation priors",
+        height_range * 100,
+    )
+
+    # Re-read existing priors and add TY values with moderate uncertainty
+    # TY_STD: ~5cm uncertainty (barometer is noisy for small changes)
+    ty_std = max(0.05, height_range * 0.3)
+
+    lines = priors_path.read_text(encoding="utf-8").splitlines()
+    new_lines = []
+    frame_idx = 0
+
+    for line in lines:
+        if line.startswith("#") or not line.strip():
+            new_lines.append(line)
+            continue
+
+        parts = line.split()
+        if len(parts) >= 14 and frame_idx < len(height_m):
+            # Replace TY (index 6) and TY_STD (index 12) with barometer values
+            parts[6] = f"{height_m[frame_idx]:.6f}"
+            parts[12] = f"{ty_std:.4f}"
+            new_lines.append(" ".join(parts))
+            frame_idx += 1
+        else:
+            new_lines.append(line)
+
+    priors_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    log.info("Stage 5: Updated %d priors with barometer-derived Y-translation (TY_STD=%.3f m)",
+             frame_idx, ty_std)
+
+
+def _compute_gravity_alignment(sensor_data: dict, session: dict) -> None:
+    """Compute gravity-derived "up" direction from accelerometer data.
+
+    When the camera is approximately stationary between movements, the
+    accelerometer reading is dominated by gravity.  The mean acceleration
+    vector gives us the gravity direction, which we save for aligning the
+    reconstruction so that "up" in the model matches real-world "up".
+    """
+    import numpy as np
+
+    if "frame_accel" not in sensor_data:
+        return
+
+    accel = sensor_data["frame_accel"]  # Nx3
+    if len(accel) < 2:
+        return
+
+    # Average gravity direction (negate because accelerometer measures
+    # reaction force: phone resting on table reads +9.8 on Z)
+    gravity = accel.mean(axis=0)
+    gravity_norm = np.linalg.norm(gravity)
+    if gravity_norm < 1.0:
+        log.warning("Stage 5: Gravity vector magnitude too low (%.2f), skipping alignment", gravity_norm)
+        return
+
+    up_direction = -gravity / gravity_norm
+
+    # Save gravity alignment data
+    sensors_dir = session["proc_dir"] / "sensors"
+    sensors_dir.mkdir(parents=True, exist_ok=True)
+    gravity_path = sensors_dir / "gravity_alignment.npz"
+    np.savez(
+        str(gravity_path),
+        up_direction=up_direction,
+        gravity_vector=gravity,
+        gravity_magnitude=np.array(gravity_norm),
+    )
+
+    log.info(
+        "Stage 5: Gravity alignment — up=[%.3f, %.3f, %.3f], |g|=%.2f m/s^2",
+        up_direction[0], up_direction[1], up_direction[2], gravity_norm,
+    )
+
+
 def stage_5_compute_priors(config: dict, session: dict) -> bool:
-    """Compute rotation priors from IMU for COLMAP."""
+    """Compute rotation priors from IMU for COLMAP.
+
+    When Sensor Logger data is available (pre-fused quaternions), this stage
+    uses those directly — they are far more accurate than Madgwick-filtered
+    IMU because Samsung already fused accel+gyro+mag with their Kalman filter.
+    """
     marker = session["proc_dir"] / ".stage_5_complete"
     if stage_complete(marker):
         log.info("Stage 5: Prior computation already complete, skipping")
         return True
 
+    # -- Check for Sensor Logger pre-fused orientations --
+    sensor_logger_marker = session["proc_dir"] / ".sensor_logger_available"
+    if sensor_logger_marker.exists():
+        log.info("Stage 5: Using Sensor Logger pre-fused quaternions (skipping Madgwick)")
+
+        from sensors.sensor_logger import (
+            align_sensor_to_video,
+            generate_rotation_priors_from_sensor_logger,
+        )
+
+        npz_path = Path(sensor_logger_marker.read_text().strip())
+        frame_names = sorted(
+            [f.name for f in (session["proc_dir"] / "frames_srgb").glob("*.png")]
+            + [f.name for f in (session["proc_dir"] / "frames_srgb").glob("*.jpg")]
+        )
+
+        if not frame_names:
+            log.warning("Stage 5: No frames found in frames_srgb, skipping priors")
+            mark_stage_complete(marker)
+            return True
+
+        try:
+            # Re-align if not already in session (e.g. resuming from stage 5)
+            sensor_data = session.get("sensor_logger_data")
+            if sensor_data is None:
+                for video_path in session["video_paths"]:
+                    sensor_data = align_sensor_to_video(
+                        sensor_npz_path=npz_path,
+                        video_path=video_path,
+                    )
+                    break
+
+            if sensor_data is not None and "frame_quaternions" in sensor_data:
+                priors_file = session["proc_dir"] / "colmap" / "image_priors.txt"
+                generate_rotation_priors_from_sensor_logger(
+                    sensor_data=sensor_data,
+                    frame_names=frame_names,
+                    output_path=priors_file,
+                )
+                # Also save a copy in sensors/ for reference
+                sensors_priors = session["proc_dir"] / "sensors" / "rotation_priors.txt"
+                sensors_priors.parent.mkdir(parents=True, exist_ok=True)
+                if not sensors_priors.exists():
+                    shutil.copy2(priors_file, sensors_priors)
+
+                # Log trajectory assessment
+                from sensors.sensor_logger import estimate_camera_trajectory
+                trajectory = estimate_camera_trajectory(
+                    orientation_quats=sensor_data["frame_quaternions"],
+                    timestamps=sensor_data["frame_timestamps"],
+                )
+                log.info("Stage 5: Trajectory — %s", trajectory["coverage_assessment"])
+                log.info("Stage 5: Wrote COLMAP priors from Sensor Logger (pre-fused, tighter uncertainty)")
+
+                # --- Barometer → height priors (Y-translation constraint) ---
+                # Pressure deltas convert to altitude changes: 1 hPa ~= 8.43m
+                # This gives us the ONLY translation prior from sensor data.
+                _enhance_priors_with_barometer(priors_file, sensor_data, frame_names)
+
+                # --- Gravity alignment from accelerometer ---
+                # Save the gravity-derived "up" direction so post-reconstruction
+                # alignment (stage 6 or stage 14) can orient the face correctly.
+                _compute_gravity_alignment(sensor_data, session)
+            else:
+                log.warning("Stage 5: Sensor Logger data missing quaternions, falling back to Madgwick")
+                sensor_logger_marker.unlink(missing_ok=True)
+                # Fall through to legacy path below
+
+        except Exception as e:
+            log.warning("Stage 5: Sensor Logger priors failed: %s — falling back to Madgwick", e)
+            sensor_logger_marker.unlink(missing_ok=True)
+
+        # If we successfully wrote priors, mark complete and return
+        priors_path = session["proc_dir"] / "colmap" / "image_priors.txt"
+        if priors_path.exists():
+            mark_stage_complete(marker)
+            return True
+
+    # -- Legacy: Madgwick filter from video-embedded IMU --
     sensor_cfg = config["sensors"]
     imu_path = session["proc_dir"] / "imu_data.npz"
     if not imu_path.exists():
@@ -684,20 +1528,53 @@ def stage_6_colmap(config: dict, session: dict) -> bool:
 
     # Register photos into COLMAP reconstruction if available
     if has_photos:
-        photos_dir = session["proc_dir"] / "photos"
         colmap_model_dir = session["proc_dir"] / "colmap" / "sparse" / "0"
-        if photos_dir.exists() and colmap_model_dir.exists():
-            log.info("Stage 6: Registering Expert RAW photos into COLMAP reconstruction...")
-            from capture.photo_processor import register_photos_into_reconstruction
+
+        # Check if we have multi-lens data (from Stage 0)
+        has_multi_lens = (
+            photo_manifest.get("lens_groups") is not None
+            and colmap_model_dir.exists()
+        )
+
+        if has_multi_lens:
+            log.info("Stage 6: Multi-lens photo registration (wide + 200MP)...")
+            from capture.multi_res_processor import register_multi_lens_photos
+
+            wide_dir = session["proc_dir"] / "photos_wide"
+            quarter_dir = session["proc_dir"] / "photos_200mp" / "quarter"
+
+            # Load camera models if available
+            cam_models_path = session["proc_dir"] / "camera_models.json"
+            camera_models = None
+            if cam_models_path.exists():
+                camera_models = json.loads(cam_models_path.read_text(encoding="utf-8"))
+
             try:
-                updated_dir = register_photos_into_reconstruction(
-                    photo_dir=photos_dir,
+                updated_dir = register_multi_lens_photos(
+                    wide_photos_dir=wide_dir,
+                    main_photos_dir=quarter_dir,
                     colmap_model_dir=colmap_model_dir,
                     colmap_binary=colmap_cfg["binary"],
+                    camera_models=camera_models,
                 )
-                log.info("Stage 6: Photos registered, updated model at %s", updated_dir)
+                log.info("Stage 6: Multi-lens photos registered, model at %s", updated_dir)
             except Exception as e:
-                log.warning("Stage 6: Photo registration failed (continuing without): %s", e)
+                log.warning("Stage 6: Multi-lens registration failed (continuing without): %s", e)
+        else:
+            # Legacy single-lens path
+            photos_dir = session["proc_dir"] / "photos"
+            if photos_dir.exists() and colmap_model_dir.exists():
+                log.info("Stage 6: Registering Expert RAW photos into COLMAP reconstruction...")
+                from capture.photo_processor import register_photos_into_reconstruction
+                try:
+                    updated_dir = register_photos_into_reconstruction(
+                        photo_dir=photos_dir,
+                        colmap_model_dir=colmap_model_dir,
+                        colmap_binary=colmap_cfg["binary"],
+                    )
+                    log.info("Stage 6: Photos registered, updated model at %s", updated_dir)
+                except Exception as e:
+                    log.warning("Stage 6: Photo registration failed (continuing without): %s", e)
 
     mark_stage_complete(marker)
     return True
@@ -1045,17 +1922,64 @@ def stage_13_train_gaussians(config: dict, session: dict) -> bool:
     cameras = load_cameras_from_colmap(session["proc_dir"] / "colmap" / "sparse" / "0")
 
     # Build photo weight info for weighted view sampling
+    # Supports per-lens weights: 200MP face crops = 5x, wide DNG = 3x, video = 1x
     photo_manifest_path = session["proc_dir"] / "photo_manifest.json"
     photo_names = set()
     photo_weight = 1.0
+    per_image_weights = {}  # name -> weight (for multi-lens data)
     if photo_manifest_path.exists():
         manifest = json.loads(photo_manifest_path.read_text(encoding="utf-8"))
         photo_names = set(manifest.get("photo_names", []))
         photos_cfg = config.get("photos", {})
         photo_weight = photos_cfg.get("weight", manifest.get("weight", 3.0))
-        if photo_names:
+
+        # Check for per-lens weight groups (from multi-source Stage 0)
+        lens_groups = manifest.get("lens_groups")
+        if lens_groups:
+            for lens_name, group_info in lens_groups.items():
+                group_weight = group_info.get("weight", photo_weight)
+                for name in group_info.get("names", []):
+                    per_image_weights[name] = group_weight
+
+            # Log per-lens summary
+            for lens_name, group_info in lens_groups.items():
+                n = len(group_info.get("names", []))
+                w = group_info.get("weight", photo_weight)
+                if n > 0:
+                    log.info(
+                        "Stage 13: %d %s photo views weighted %.1fx",
+                        n, lens_name, w,
+                    )
+
+            # Use the max weight as the default photo_weight for
+            # backward-compatible trainer API
+            if per_image_weights:
+                photo_weight = max(per_image_weights.values())
+        elif photo_names:
             log.info("Stage 13: %d photo views will be weighted %.1fx during training",
                      len(photo_names), photo_weight)
+
+    # Load per-frame lighting data from sensor logger (if available)
+    # Frames with unusual lighting get lower loss weight during training
+    lighting_weights = None
+    lighting_npz_path = session["proc_dir"] / "sensors" / "lighting_profile.npz"
+    if lighting_npz_path.exists():
+        import numpy as np
+        lighting_data = np.load(str(lighting_npz_path))
+        adjustment_factors = lighting_data["frame_adjustment_factors"]
+        outlier_mask = lighting_data["outlier_mask"]
+        median_lux = float(lighting_data["median_lux"])
+
+        # Build per-frame loss weights: outlier frames get reduced weight (0.3x),
+        # normal frames get 1.0.  This prevents inconsistent lighting from
+        # corrupting the appearance model.
+        lighting_weights = np.where(outlier_mask, 0.3, 1.0).astype(np.float32)
+        n_outliers = int(outlier_mask.sum())
+        log.info(
+            "Stage 13: Lighting-aware training — median %.0f lux, %d outlier frames "
+            "will be down-weighted to 0.3x",
+            median_lux, n_outliers,
+        )
 
     # Load initialized Gaussians
     init_path = session["proc_dir"] / "gaussians_init.pt"
@@ -1090,6 +2014,8 @@ def stage_13_train_gaussians(config: dict, session: dict) -> bool:
                 output_dir=session["out_dir"],
                 photo_names=photo_names if photo_names else None,
                 photo_weight=photo_weight,
+                per_image_weights=per_image_weights if per_image_weights else None,
+                lighting_weights=lighting_weights,
             )
             # Training succeeded
             break
@@ -1201,6 +2127,11 @@ def stage_14_export(config: dict, session: dict) -> bool:
             substep_ok["mesh"] = False
 
     # ---- 3. Texture baking onto extracted mesh --------------------------
+    #
+    # Texture source priority (highest quality first):
+    #   1. Full-res 200MP photos / face crops — pore-level detail
+    #   2. Wide-lens DNG photos — secondary coverage
+    #   3. Video frames — fill remaining gaps
     try:
         mesh_obj = out_dir / "mesh.obj"
         mesh_ply = out_dir / "mesh.ply"
@@ -1212,7 +2143,25 @@ def stage_14_export(config: dict, session: dict) -> bool:
             colmap_dir = session["proc_dir"] / "colmap" / "sparse" / "0"
             if not colmap_dir.exists():
                 colmap_dir = session["proc_dir"] / "colmap" / "sparse"
-            images_dir = session["proc_dir"] / "frames"
+
+            # Determine best texture source images
+            face_crops_dir = session["proc_dir"] / "photos_200mp" / "face_crops"
+            full_200mp_dir = session["proc_dir"] / "photos_200mp" / "full"
+            wide_photos_dir = session["proc_dir"] / "photos_wide"
+            frames_dir = session["proc_dir"] / "frames"
+
+            if full_200mp_dir.exists() and any(full_200mp_dir.iterdir()):
+                images_dir = full_200mp_dir
+                log.info("Stage 14: Using full-res 200MP photos for texture baking (primary)")
+            elif face_crops_dir.exists() and any(face_crops_dir.iterdir()):
+                images_dir = face_crops_dir
+                log.info("Stage 14: Using 200MP face crops for texture baking (primary)")
+            elif wide_photos_dir.exists() and any(wide_photos_dir.iterdir()):
+                images_dir = wide_photos_dir
+                log.info("Stage 14: Using wide-lens photos for texture baking")
+            else:
+                images_dir = frames_dir
+                log.info("Stage 14: Using video frames for texture baking")
 
             cameras = load_cameras_from_colmap(colmap_dir)
 
@@ -1221,6 +2170,12 @@ def stage_14_export(config: dict, session: dict) -> bool:
             flame_texture_path = flame_tex if flame_tex.exists() else None
 
             tex_res = export_cfg.get("texture_resolution", 2048)
+
+            # Increase texture resolution when 200MP data is available
+            if full_200mp_dir.exists() and any(full_200mp_dir.iterdir()):
+                tex_res = max(tex_res, 4096)
+                log.info("Stage 14: Increased texture resolution to %d for 200MP data", tex_res)
+
             bake_texture(
                 mesh_path=mesh_file,
                 cameras=cameras,
@@ -1567,6 +2522,7 @@ Output:     {out}
 # ---------------------------------------------------------------------------
 
 STAGES = [
+    (0, "Organize inputs", stage_0_organize_inputs),
     (1, "Extract frames", stage_1_extract_frames),
     (2, "Color correction", stage_2_color_correct),
     (3, "Filter frames", stage_3_filter_frames),
@@ -1584,46 +2540,177 @@ STAGES = [
 ]
 
 
+def _auto_detect_content_dir(content_dir: Path) -> dict:
+    """Scan a directory for videos, photos, and sensor logs.
+
+    Returns a dict with keys: videos, photos, sensor_logs (lists of Paths).
+    """
+    if not content_dir.exists():
+        log.error("Content directory does not exist: %s", content_dir)
+        sys.exit(1)
+
+    videos = []
+    photos = []
+    sensor_logs = []
+
+    for f in sorted(content_dir.iterdir()):
+        if not f.is_file():
+            continue
+        suffix = f.suffix.lower()
+        if suffix in (".mp4", ".mov"):
+            videos.append(f)
+        elif suffix == ".dng":
+            photos.append(f)
+        elif suffix in (".jpg", ".jpeg"):
+            # Include JPGs — either they have a matching DNG or are standalone
+            photos.append(f)
+        elif suffix == ".zip":
+            # Validate it looks like a Sensor Logger archive
+            try:
+                import zipfile as _zf
+                with _zf.ZipFile(f, "r") as zf:
+                    names = zf.namelist()
+                    sensor_csvs = (
+                        "Accelerometer.csv", "Gyroscope.csv",
+                        "Orientation.csv", "Magnetometer.csv",
+                        "Light.csv", "Barometer.csv",
+                    )
+                    has_sensor_csv = any(
+                        n.endswith(sn) for n in names for sn in sensor_csvs
+                    )
+                if has_sensor_csv:
+                    sensor_logs.append(f)
+                else:
+                    log.debug("ZIP %s does not appear to be a Sensor Logger archive", f.name)
+            except Exception:
+                log.debug("Could not read ZIP %s, skipping", f.name)
+
+    # Classify photos by type for the summary log
+    n_dng = sum(1 for p in photos if p.suffix.lower() == ".dng")
+    n_jpg = sum(1 for p in photos if p.suffix.lower() in (".jpg", ".jpeg"))
+    log.info(
+        "Auto-detected from %s: %d video(s), %d DNG(s), %d JPG(s), %d sensor log(s)",
+        content_dir, len(videos), n_dng, n_jpg, len(sensor_logs),
+    )
+
+    return {"videos": videos, "photos": photos, "sensor_logs": sensor_logs}
+
+
+def _deduplicate_paths(paths: list[Path]) -> list[Path]:
+    """Deduplicate a list of Paths by their resolved absolute path."""
+    seen = set()
+    unique = []
+    for p in paths:
+        rp = p.resolve()
+        if rp not in seen:
+            seen.add(rp)
+            unique.append(p)
+    return unique
+
+
+def resolve_inputs(args) -> dict:
+    """Normalize all input sources into a single dict.
+
+    Merges --content-dir auto-detection with explicit --video, --photos,
+    --sensor-log arguments. Returns:
+        {"videos": [Path], "photos": [Path], "sensor_logs": [Path]}
+    """
+    videos = []
+    photos = []
+    sensor_logs = []
+
+    # Auto-detect from --content-dir
+    if args.content_dir:
+        detected = _auto_detect_content_dir(Path(args.content_dir))
+        videos.extend(detected["videos"])
+        photos.extend(detected["photos"])
+        sensor_logs.extend(detected["sensor_logs"])
+
+    # Merge explicit --video
+    if args.video:
+        videos.extend(Path(v) for v in args.video)
+
+    # Merge explicit --photos (with glob expansion)
+    if args.photos:
+        import glob as glob_mod
+        for pattern in args.photos:
+            expanded = glob_mod.glob(pattern)
+            if expanded:
+                photos.extend(Path(p) for p in expanded)
+            else:
+                p = Path(pattern)
+                if p.exists():
+                    photos.append(p)
+                else:
+                    log.warning("Photo path not found: %s", pattern)
+
+    # Merge explicit --sensor-log
+    if args.sensor_log:
+        for sl in args.sensor_log:
+            sl_path = Path(sl)
+            if sl_path.exists():
+                sensor_logs.append(sl_path)
+            else:
+                log.warning("Sensor Logger ZIP not found: %s", sl_path)
+
+    return {
+        "videos": _deduplicate_paths(videos),
+        "photos": _deduplicate_paths(photos),
+        "sensor_logs": _deduplicate_paths(sensor_logs),
+    }
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Face3D Pipeline")
-    parser.add_argument("--video", nargs="+", required=True, help="Input video file(s)")
+    parser = argparse.ArgumentParser(
+        description="Face3D Pipeline — 3D face reconstruction from S25 Ultra captures",
+        epilog=(
+            "Examples:\n"
+            "  python scripts/run_pipeline.py --content-dir content/New --session natalie\n"
+            "  python scripts/run_pipeline.py --video face.mp4\n"
+            "  python scripts/run_pipeline.py --video face.mp4 --photos *.dng --sensor-log sensors.zip\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--video", nargs="+", default=None, help="Input video file(s)")
+    parser.add_argument("--content-dir", default=None,
+                        help="Directory with mixed video/photos/sensors (auto-detect all)")
     parser.add_argument("--config", default=str(PROJECT_ROOT / "config" / "pipeline.yaml"))
     parser.add_argument("--session", default=None, help="Session ID (auto-generated if omitted)")
-    parser.add_argument("--start-stage", type=int, default=1, help="Stage to start from")
+    parser.add_argument("--start-stage", type=int, default=0, help="Stage to start from")
     parser.add_argument("--end-stage", type=int, default=14, help="Stage to end at")
     parser.add_argument("--force", action="store_true", help="Force re-run even if stage is complete")
     parser.add_argument("--photos", nargs="*", default=None,
                         help="Expert RAW photos for high-quality texture (glob patterns or file paths)")
+    parser.add_argument("--sensor-log", nargs="*", default=None,
+                        help="Sensor Logger ZIP file(s) for high-quality IMU/orientation data")
     args = parser.parse_args()
 
     config = load_config(Path(args.config))
 
-    # Validate config and inputs before anything else
-    video_paths = [Path(v) for v in args.video]
-    validate_config(config, video_paths)
+    # Resolve all inputs from --content-dir and/or explicit args
+    inputs = resolve_inputs(args)
 
-    session = setup_session(config, args.session, args.video)
+    if not inputs["videos"]:
+        parser.error(
+            "No video files found. Use --video or --content-dir with a "
+            "directory containing .mp4/.mov files."
+        )
 
-    # Resolve photo paths (expand glob patterns)
-    if args.photos:
-        import glob as glob_mod
-        photo_paths = []
-        for pattern in args.photos:
-            expanded = glob_mod.glob(pattern)
-            if expanded:
-                photo_paths.extend(Path(p) for p in expanded)
-            else:
-                # Treat as literal path
-                p = Path(pattern)
-                if p.exists():
-                    photo_paths.append(p)
-                else:
-                    log.warning("Photo path not found: %s", pattern)
-        session["photo_paths"] = photo_paths
-        if photo_paths:
-            log.info("Photos: %d files provided", len(photo_paths))
-    else:
-        session["photo_paths"] = []
+    # Validate config and inputs
+    validate_config(config, inputs["videos"])
+
+    # Setup session with organized folder structure
+    session = setup_session(config, args.session, [str(v) for v in inputs["videos"]])
+    session["photo_paths"] = inputs["photos"]
+    session["sensor_log_paths"] = inputs["sensor_logs"]
+    session["sensor_log_path"] = inputs["sensor_logs"][0] if inputs["sensor_logs"] else None
+
+    # Log what we found
+    if inputs["photos"]:
+        log.info("Photos: %d files", len(inputs["photos"]))
+    if inputs["sensor_logs"]:
+        log.info("Sensor Logger: %d file(s) — %s", len(inputs["sensor_logs"]),
+                 ", ".join(p.name for p in inputs["sensor_logs"]))
 
     log.info("Session: %s", session["session_id"])
     log.info("Videos: %s", [str(v) for v in session["video_paths"]])
@@ -1640,7 +2727,7 @@ def main():
                 marker.unlink(missing_ok=True)
 
         log.info("=" * 60)
-        log.info("Stage %d/14: %s", stage_num, stage_name)
+        log.info("Stage %d: %s", stage_num, stage_name)
         log.info("=" * 60)
 
         stage_start = time.time()

@@ -109,11 +109,20 @@ splatting:
 # Photo settings (Expert RAW / additional high-quality photos)
 photos:
   enabled: true
-  weight: 3.0  # How much more to weight photo views vs video frames during training
+  weight: 3.0  # Default weight for photo views vs video frames during training
+  multi_lens:
+    wide_23mm_weight: 3.0  # Wide-lens DNG photos (same lens as video)
+    main_200mp_weight: 5.0  # 200MP main sensor face crops (highest quality)
+    video_weight: 1.0  # Video frames (baseline)
   raw_processing:
     demosaic: "DHT"  # Best quality demosaicing for DNG files
     use_camera_wb: true
     output_bps: 16
+  multi_res:
+    full_tiff: true  # Save full-res 200MP as 16-bit TIFF for texture baking
+    quarter_png: true  # Save quarter-res for DA3/COLMAP registration
+    display_size: [1920, 1440]  # Preview resolution
+    face_crop_padding: 1.5  # Face bbox expansion factor for crops
 
 # Hardware
 device: "cuda"
