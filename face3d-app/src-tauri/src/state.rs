@@ -13,6 +13,10 @@ pub struct Session {
     pub has_gaussians: bool,
     pub has_mesh: bool,
     pub has_renders: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

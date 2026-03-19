@@ -23,18 +23,49 @@ pub async fn list_sessions() -> AppResult<Vec<Session>> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
+
+            // Get folder modification time as created_at
+            let created_at = fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|t| {
+                    let datetime: chrono::DateTime<chrono::Local> = t.into();
+                    datetime.to_rfc3339()
+                });
+
+            // Calculate total size of output files
+            let total_size_bytes = calculate_dir_size(&path);
+
             sessions.push(Session {
                 id: name.clone(),
                 name,
                 has_gaussians: path.join("gaussians.ply").exists(),
                 has_mesh: path.join("mesh.ply").exists() || path.join("mesh.obj").exists(),
                 has_renders: path.join("renders").exists(),
+                created_at,
+                total_size_bytes: if total_size_bytes > 0 { Some(total_size_bytes) } else { None },
             });
         }
     }
 
-    sessions.sort_by(|a, b| b.id.cmp(&a.id)); // newest first
+    // Sort by modification time (newest first)
+    sessions.sort_by(|a, b| {
+        b.created_at.as_deref().unwrap_or("").cmp(a.created_at.as_deref().unwrap_or(""))
+    });
     Ok(sessions)
+}
+
+fn calculate_dir_size(dir: &Path) -> u64 {
+    let mut size = 0u64;
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                size += fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    size
 }
 
 #[command]
