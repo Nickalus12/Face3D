@@ -469,13 +469,42 @@ def _write_image_priors(
         logger.warning("Image priors file not found: %s — skipping", priors_path)
         return
 
+    # Try loading as JSON first (legacy format), then COLMAP text format
+    priors: dict = {}
     with open(priors_path, "r", encoding="utf-8") as fh:
-        priors: dict = json.load(fh)
+        content = fh.read().strip()
+
+    if not content:
+        return
+
+    try:
+        priors = json.loads(content)
+    except json.JSONDecodeError:
+        # Parse COLMAP image_priors.txt format:
+        # IMAGE_NAME QW QX QY QZ TX TY TZ QW_STD QX_STD QY_STD QZ_STD TX_STD TY_STD TZ_STD
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) >= 8:
+                image_name = parts[0]
+                # Store quaternion as rotation values (qw, qx, qy, qz)
+                qw, qx, qy, qz = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
+                # Convert quaternion to rotation matrix for the database
+                import numpy as np
+                R = np.array([
+                    [1 - 2*qy*qy - 2*qz*qz, 2*qx*qy - 2*qw*qz, 2*qx*qz + 2*qw*qy],
+                    [2*qx*qy + 2*qw*qz, 1 - 2*qx*qx - 2*qz*qz, 2*qy*qz - 2*qw*qx],
+                    [2*qx*qz - 2*qw*qy, 2*qy*qz + 2*qw*qx, 1 - 2*qx*qx - 2*qy*qy],
+                ])
+                priors[image_name] = R.flatten().tolist()
+        logger.info("Parsed %d priors from COLMAP text format", len(priors))
 
     if not priors:
         return
 
-    logger.info("Applying %d IMU rotation priors to database ...", len(priors))
+    logger.info("Applying %d rotation priors to database ...", len(priors))
 
     # COLMAP does not expose a direct CLI for per-image rotation priors, so
     # we manipulate the SQLite database directly.

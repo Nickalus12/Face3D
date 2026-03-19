@@ -25,6 +25,10 @@ from pathlib import Path
 
 import yaml
 
+# Disable PIL decompression bomb check globally (200MP Samsung photos = 199M pixels)
+import PIL.Image
+PIL.Image.MAX_IMAGE_PIXELS = None
+
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))

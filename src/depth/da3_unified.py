@@ -202,10 +202,13 @@ def _unproject_depth_to_points(
         and colors is (M, 3) uint8.
     """
     H, W = depth.shape[:2]
+    img_H, img_W = image.shape[:2]
 
-    # Build pixel grid at stride intervals
-    ys = np.arange(0, H, stride)
-    xs = np.arange(0, W, stride)
+    # Build pixel grid at stride intervals, clamped to valid range for ALL arrays
+    max_y = min(H, img_H) - 1
+    max_x = min(W, img_W) - 1
+    ys = np.arange(0, max_y + 1, stride)
+    xs = np.arange(0, max_x + 1, stride)
     xx, yy = np.meshgrid(xs, ys)
     xx = xx.flatten()
     yy = yy.flatten()
@@ -215,7 +218,10 @@ def _unproject_depth_to_points(
     valid = (d > depth_min) & (d < depth_max) & np.isfinite(d)
 
     if confidence is not None:
-        conf = confidence[yy, xx]
+        # Clamp indices for confidence array which may differ in size
+        cy = np.clip(yy, 0, confidence.shape[0] - 1)
+        cx = np.clip(xx, 0, confidence.shape[1] - 1)
+        conf = confidence[cy, cx]
         valid &= conf > conf_threshold
 
     xx = xx[valid]
