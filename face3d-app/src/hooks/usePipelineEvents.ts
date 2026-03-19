@@ -73,6 +73,64 @@ export function usePipelineEvents(): void {
         invalidateSessionCaches();
         useSessionStore.getState().fetchSessions();
 
+        // AI-powered post-pipeline analysis (async, non-blocking)
+        const sessionId = state.sessionName;
+        if (exitCode === 0) {
+          // Quality critique on renders (if AI enabled)
+          import('../lib/gemini').then(({ isGeminiEnabled, critiqueRenders }) => {
+            isGeminiEnabled().then(enabled => {
+              if (!enabled || !sessionId) return;
+              // Load 5 turntable frames as base64 for critique
+              import('../lib/api').then(({ listRenders }) => {
+                listRenders(sessionId).then(async renders => {
+                  if (renders.length < 3) return;
+                  // Pick 5 evenly-spaced frames
+                  const step = Math.max(1, Math.floor(renders.length / 5));
+                  const picks = [0, step, step * 2, step * 3, Math.min(step * 4, renders.length - 1)];
+                  try {
+                    const { convertFileSrc } = await import('@tauri-apps/api/core');
+                    const base64s: string[] = [];
+                    for (const idx of picks) {
+                      const src = convertFileSrc(renders[idx]);
+                      const resp = await fetch(src);
+                      const blob = await resp.blob();
+                      const buffer = await blob.arrayBuffer();
+                      base64s.push(btoa(String.fromCharCode(...new Uint8Array(buffer))));
+                    }
+                    const critique = await critiqueRenders(base64s, sessionId);
+                    if (critique) {
+                      console.log(`[AI] Quality critique: ${critique.grade} (${critique.score}/100) — ${critique.summary}`);
+                    }
+                  } catch (e) {
+                    console.warn('[AI] Quality critique skipped:', e);
+                  }
+                }).catch(() => {});
+              });
+            }).catch(() => {});
+          }).catch(() => {});
+        } else {
+          // Error diagnosis (if AI enabled)
+          import('../lib/gemini').then(({ isGeminiEnabled, diagnoseError }) => {
+            isGeminiEnabled().then(enabled => {
+              if (!enabled) return;
+              // Collect last 20 error log lines
+              const errorLines = state.logs
+                .filter(l => l.level === 'error' || l.message.includes('Error') || l.message.includes('Traceback'))
+                .slice(-20)
+                .map(l => l.message)
+                .join('\n');
+              if (!errorLines) return;
+              const currentStage = state.stages.find(s => s.status === 'error')?.name ?? 'Unknown';
+              diagnoseError(errorLines, currentStage, sessionId).then(diagnosis => {
+                if (diagnosis) {
+                  console.log(`[AI] Error diagnosis: ${diagnosis.summary}`);
+                  console.log(`[AI] Fix: ${diagnosis.fix}`);
+                }
+              }).catch(() => {});
+            }).catch(() => {});
+          }).catch(() => {});
+        }
+
         // Flash the window title briefly
         if (document.title) {
           const original = document.title;

@@ -12,6 +12,10 @@ import {
   Monitor,
   Check,
   Loader2,
+  Brain,
+  Eye,
+  EyeOff,
+  Trash2,
 } from 'lucide-react';
 import useSettingsStore, { PRESETS, type Preset } from '../store/settingsStore';
 
@@ -549,6 +553,11 @@ export default function SettingsPanel() {
           />
         </Section>
 
+        {/* AI Integration */}
+        <Section title="AI Features" icon={Brain} defaultOpen={false}>
+          <AiSettingsSection />
+        </Section>
+
         {/* System Info */}
         <Section title="System Info" icon={Monitor} defaultOpen={false}>
           <div className="space-y-0.5">
@@ -613,6 +622,159 @@ export default function SettingsPanel() {
 
         {/* Bottom spacer */}
         <div className="h-4" />
+      </div>
+    </div>
+  );
+}
+
+// ── AI Settings Sub-Component ─────────────────────────────────
+
+function AiSettingsSection() {
+  const [apiKey, setApiKey] = useState('');
+  const [showKey, setShowKey] = useState(false);
+  const [hasKey, setHasKey] = useState(false);
+  const [enabled, setEnabled] = useState(true);
+  const [isValidating, setIsValidating] = useState(false);
+  const [validationResult, setValidationResult] = useState<{ valid: boolean; error?: string } | null>(null);
+
+  // Load current state from DB on mount
+  useEffect(() => {
+    import('../lib/gemini').then(({ getGeminiApiKey, isGeminiEnabled }) => {
+      getGeminiApiKey().then(key => {
+        if (key) {
+          setHasKey(true);
+          setApiKey(key);
+        }
+      }).catch(() => {});
+      isGeminiEnabled().then(setEnabled).catch(() => {});
+    }).catch(() => {});
+  }, []);
+
+  const handleSaveKey = async () => {
+    if (!apiKey.trim()) return;
+    setIsValidating(true);
+    setValidationResult(null);
+    try {
+      const { validateApiKey, setGeminiApiKey } = await import('../lib/gemini');
+      const result = await validateApiKey(apiKey.trim());
+      setValidationResult(result);
+      if (result.valid) {
+        await setGeminiApiKey(apiKey.trim());
+        setHasKey(true);
+      }
+    } catch {
+      setValidationResult({ valid: false, error: 'Failed to validate' });
+    }
+    setIsValidating(false);
+  };
+
+  const handleRemoveKey = async () => {
+    try {
+      const { clearGeminiApiKey } = await import('../lib/gemini');
+      await clearGeminiApiKey();
+      setApiKey('');
+      setHasKey(false);
+      setValidationResult(null);
+    } catch {}
+  };
+
+  const handleToggleEnabled = async (value: boolean) => {
+    setEnabled(value);
+    try {
+      const { setAiFeaturesEnabled } = await import('../lib/gemini');
+      await setAiFeaturesEnabled(value);
+    } catch {}
+  };
+
+  return (
+    <div className="space-y-4">
+      <p className="text-xs text-zinc-500 leading-relaxed">
+        AI features use Gemini Flash to analyze your reconstructions and diagnose pipeline errors. Requires a Google AI API key.
+      </p>
+
+      {/* Enable/Disable Toggle */}
+      <div className="flex items-center justify-between py-2">
+        <div>
+          <span className="text-sm text-zinc-300">Enable AI Features</span>
+          <p className="text-[11px] text-zinc-600 mt-0.5">Quality critique + error diagnosis</p>
+        </div>
+        <button
+          onClick={() => handleToggleEnabled(!enabled)}
+          className={`w-10 h-5 rounded-full transition-colors duration-200 ${
+            enabled ? 'bg-indigo-500' : 'bg-zinc-700'
+          }`}
+        >
+          <div className={`w-4 h-4 rounded-full bg-white shadow-sm transition-transform duration-200 ml-0.5 ${
+            enabled ? 'translate-x-5' : 'translate-x-0'
+          }`} />
+        </button>
+      </div>
+
+      {/* API Key Input */}
+      <div>
+        <label className="text-xs font-medium text-zinc-400 block mb-1.5">
+          Google AI API Key
+        </label>
+        <div className="flex gap-2">
+          <div className="relative flex-1">
+            <input
+              type={showKey ? 'text' : 'password'}
+              value={apiKey}
+              onChange={(e) => { setApiKey(e.target.value); setValidationResult(null); }}
+              placeholder={hasKey ? '••••••••••••••••' : 'Enter API key...'}
+              className="w-full bg-zinc-800/60 border border-zinc-700/50 rounded-lg px-3 py-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/20 transition-colors pr-10 font-mono"
+            />
+            <button
+              onClick={() => setShowKey(!showKey)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-1"
+            >
+              {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
+            </button>
+          </div>
+          <button
+            onClick={handleSaveKey}
+            disabled={!apiKey.trim() || isValidating}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+              apiKey.trim() && !isValidating
+                ? 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                : 'bg-zinc-800 text-zinc-600 cursor-not-allowed'
+            }`}
+          >
+            {isValidating ? <Loader2 size={14} className="animate-spin" /> : 'Save'}
+          </button>
+        </div>
+
+        {/* Validation feedback */}
+        {validationResult && (
+          <div className={`mt-2 text-xs flex items-center gap-1.5 ${
+            validationResult.valid ? 'text-emerald-400' : 'text-red-400'
+          }`}>
+            {validationResult.valid ? (
+              <><Check size={12} /> API key validated successfully</>
+            ) : (
+              <>Invalid: {validationResult.error}</>
+            )}
+          </div>
+        )}
+
+        {/* Remove key */}
+        {hasKey && (
+          <button
+            onClick={handleRemoveKey}
+            className="mt-2 flex items-center gap-1 text-xs text-red-400/60 hover:text-red-400 transition-colors"
+          >
+            <Trash2 size={11} /> Remove API key
+          </button>
+        )}
+      </div>
+
+      {/* Info */}
+      <div className="p-3 rounded-lg bg-zinc-800/30 border border-zinc-800/50">
+        <p className="text-[11px] text-zinc-500 leading-relaxed">
+          Get a free API key at{' '}
+          <span className="text-indigo-400">aistudio.google.com</span>.
+          Gemini Flash has a free tier (15 requests/min). Your key is stored locally in the app database — never sent anywhere except Google's API.
+        </p>
       </div>
     </div>
   );

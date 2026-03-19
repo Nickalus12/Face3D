@@ -176,9 +176,31 @@ const MIGRATIONS: Migration[] = [
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
       `CREATE INDEX IF NOT EXISTS idx_embeddings_session ON scan_embeddings(session_id)`,
-      // Vector index for similarity search (cosine distance)
-      // NOTE: libsql_vector_idx requires the vector extension enabled
-      // This will be created when the first embedding is inserted
+    ],
+  },
+  {
+    name: '007_app_settings',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+    ],
+  },
+  {
+    name: '008_ai_critiques',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS ai_critiques (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        critique_type TEXT NOT NULL,
+        grade TEXT,
+        feedback TEXT,
+        model_used TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_critiques_session ON ai_critiques(session_id)`,
     ],
   },
 ];
@@ -523,5 +545,67 @@ export async function compareSessionQuality(): Promise<any[]> {
             (SELECT COUNT(*) FROM frame_quality WHERE session_id = s.id AND selected = 1) as frame_count
      FROM sessions s
      ORDER BY s.quality_score DESC NULLS LAST`
+  );
+}
+
+// ── App Settings (API keys, preferences) ───────────────────
+
+export async function getSetting(key: string): Promise<string | null> {
+  const database = await getDb();
+  const rows = await database.select<{ value: string }[]>(
+    'SELECT value FROM app_settings WHERE key = $1',
+    [key]
+  );
+  return rows.length > 0 ? rows[0].value : null;
+}
+
+export async function setSetting(key: string, value: string): Promise<void> {
+  const database = await getDb();
+  await database.execute(
+    `INSERT INTO app_settings (key, value) VALUES ($1, $2)
+     ON CONFLICT(key) DO UPDATE SET value = $2, updated_at = CURRENT_TIMESTAMP`,
+    [key, value]
+  );
+}
+
+export async function deleteSetting(key: string): Promise<void> {
+  const database = await getDb();
+  await database.execute('DELETE FROM app_settings WHERE key = $1', [key]);
+}
+
+export async function getAllSettings(): Promise<Record<string, string>> {
+  const database = await getDb();
+  const rows = await database.select<{ key: string; value: string }[]>(
+    'SELECT key, value FROM app_settings'
+  );
+  const result: Record<string, string> = {};
+  for (const row of rows) {
+    result[row.key] = row.value;
+  }
+  return result;
+}
+
+// ── AI Critique Storage ────────────────────────────────────
+
+export async function storeAiCritique(critique: {
+  sessionId: string;
+  type: string;
+  grade?: string;
+  feedback: string;
+  model: string;
+}): Promise<void> {
+  const database = await getDb();
+  await database.execute(
+    `INSERT INTO ai_critiques (session_id, critique_type, grade, feedback, model_used)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [critique.sessionId, critique.type, critique.grade ?? null, critique.feedback, critique.model]
+  );
+}
+
+export async function getAiCritiques(sessionId: string): Promise<any[]> {
+  const database = await getDb();
+  return database.select<any[]>(
+    'SELECT * FROM ai_critiques WHERE session_id = $1 ORDER BY created_at DESC',
+    [sessionId]
   );
 }
