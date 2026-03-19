@@ -712,16 +712,30 @@ export default function Viewer3D() {
         </div>
       )}
 
-      {/* No model state */}
+      {/* No model state — solid dark background, clean message */}
       {noModel && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
-          <div className="flex flex-col items-center gap-3 p-6 bg-zinc-900/40 backdrop-blur-xl border border-zinc-700/20 rounded-2xl">
-            <FileQuestion size={32} className="text-zinc-500" />
-            <div className="text-sm text-zinc-400 font-medium">
-              No model available
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-[#0a0a0b]">
+          <div className="flex flex-col items-center gap-5 max-w-sm text-center px-6">
+            <div className="w-20 h-20 rounded-2xl bg-zinc-800/40 border border-zinc-700/20 flex items-center justify-center">
+              <Box size={32} className="text-zinc-600" />
             </div>
-            <div className="text-xs text-zinc-500">
-              Run the pipeline to generate a 3D reconstruction
+            <div>
+              <h3 className="text-lg font-medium text-zinc-300 mb-2">
+                No 3D Model Yet
+              </h3>
+              <p className="text-sm text-zinc-500 leading-relaxed">
+                Run the reconstruction pipeline to generate a Gaussian Splat model from your capture data.
+              </p>
+            </div>
+            <div className="flex items-center gap-4 text-xs text-zinc-600">
+              <span className="flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-600" />
+                .ply point cloud
+              </span>
+              <span className="flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-blue-600" />
+                .obj mesh
+              </span>
             </div>
           </div>
         </div>

@@ -207,16 +207,17 @@ export default function App() {
           )}
         </div>
 
+        {/* Panel toggle — lives between panel and content, never overlaps either */}
+        <button
+          onClick={() => setIsPanelOpen(!isPanelOpen)}
+          className="w-5 h-full shrink-0 flex items-center justify-center bg-[#0c0c0e] hover:bg-zinc-800/80 border-r border-zinc-800/30 text-zinc-600 hover:text-zinc-300 transition-all duration-150 cursor-pointer"
+          title={isPanelOpen ? 'Collapse panel' : 'Expand panel'}
+        >
+          {isPanelOpen ? <ChevronLeft size={12} /> : <ChevronRight size={12} />}
+        </button>
+
         {/* Main Center Area */}
         <div className="flex-1 relative flex flex-col min-w-0 bg-[#0a0a0b]">
-          {/* Panel Toggle button */}
-          <button
-            onClick={() => setIsPanelOpen(!isPanelOpen)}
-            className="absolute top-3 left-3 z-20 p-1.5 bg-[#111113]/80 backdrop-blur-xl border border-white/10 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800/80 active:scale-90 transition-all duration-150 shadow-lg shadow-black/20"
-          >
-            {isPanelOpen ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
-          </button>
-
           {/* Main Content -- switches on active view with crossfade */}
           <div className="flex-1 relative overflow-hidden">
             <div

@@ -261,29 +261,22 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
     <div className="flex flex-col h-full w-full">
       {/* Tab Bar */}
       <div className="relative shrink-0 border-b border-zinc-800/40">
-        <div ref={tabBarRef} className="flex px-4 pt-3 gap-1 relative">
+        <div ref={tabBarRef} className="flex px-3 pt-3 pb-1 gap-2 relative">
           {TABS.map((tab) => (
             <button
               key={tab.id}
               data-tab-button
               onClick={() => setActiveTab(tab.id)}
-              className={`px-4 pb-3 pt-1.5 text-[11px] font-semibold tracking-widest uppercase transition-colors relative ${
+              className={`px-4 py-2 text-[11px] font-semibold tracking-wider rounded-lg transition-all duration-150 ${
                 activeTab === tab.id
-                  ? "text-zinc-100"
-                  : "text-zinc-500 hover:text-zinc-300"
+                  ? "bg-zinc-800/80 text-zinc-100 border border-zinc-700/50"
+                  : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/30 border border-transparent"
               }`}
             >
               {tab.label}
             </button>
           ))}
-          {/* Animated underline */}
-          <div
-            className="absolute bottom-0 h-[2px] bg-indigo-500 rounded-full transition-all duration-300 ease-out"
-            style={{
-              left: indicatorStyle.left,
-              width: indicatorStyle.width,
-            }}
-          />
+          {/* Hidden — using pill-style tabs now */}
         </div>
       </div>
 

@@ -483,8 +483,8 @@ export const Gallery: React.FC = () => {
   return (
     <div className="flex-1 bg-[#0a0a0b] flex flex-col overflow-hidden">
       {/* Tab Bar */}
-      <div className="shrink-0 border-b border-zinc-800/50 px-6 pt-5 pb-0 flex items-end justify-between">
-        <div className="flex gap-1">
+      <div className="shrink-0 border-b border-zinc-800/50 px-6 pt-4 pb-3 flex items-center justify-between">
+        <div className="flex gap-2">
           {tabs.map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;

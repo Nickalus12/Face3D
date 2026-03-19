@@ -10,7 +10,7 @@
     "shell:allow-spawn",
     "shell:allow-stdin-write",
     "shell:allow-kill",
-    "fs:allow-read",
+    "fs:read-all",
     "fs:allow-exists",
     "fs:allow-stat",
     "dialog:allow-open",
@@ -18,7 +18,7 @@
     {
       "identifier": "fs:scope",
       "allow": [
-        { "path": "D:/Projects/3D/data/**" }
+        { "path": "D:/Projects/3D/**" }
       ]
     }
   ]
