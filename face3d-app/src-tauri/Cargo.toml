@@ -1,0 +1,24 @@
+[package]
+name = "face3d-app"
+version = "0.1.0"
+description = "Face3D — 3D Face Reconstruction from Samsung Galaxy S25 Ultra"
+authors = ["Nickalus Brewer"]
+edition = "2021"
+
+[lib]
+name = "face3d_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+
