@@ -44,3 +44,4 @@ DracoPy>=1.4                 # Direct Draco encoding for point clouds / meshes
 ruff>=0.3                    # Fast linter + formatter
 ty>=0.0.20                   # Astral's Rust-based type checker (replaces mypy, 10-100x faster)
 mypy>=1.8                    # Legacy type checking (kept as fallback)
+exifread>=3.0                # EXIF reader for DNG/RAW (Samsung Expert RAW support)

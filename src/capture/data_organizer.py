@@ -92,31 +92,134 @@ def _extract_exif(photo_path: Path) -> dict[str, Any]:
     Returns dict with focal_length, focal_length_35mm, datetime,
     width, height, make, model, orientation, iso, exposure_time.
 
-    For large files (200MP DNG), avoids loading pixel data by reading
-    only the EXIF header.
+    Uses exifread as primary reader (handles Samsung Expert RAW DNG),
+    falls back to Pillow for formats exifread can't handle.
     """
+    metadata: dict[str, Any] = {
+        "width": 0, "height": 0,
+        "focal_length": None, "focal_length_35mm": None,
+        "datetime": None, "datetime_original": None,
+        "exposure_time": None, "iso": None,
+        "make": "", "model": "",
+        "orientation": 1,
+    }
+
+    # ── Primary: exifread (handles DNG, TIFF, JPG without loading pixels) ──
+    try:
+        import exifread
+
+        with open(photo_path, "rb") as f:
+            tags = exifread.process_file(f, details=False)
+
+        if tags:
+            # Dimensions
+            w = tags.get("Image ImageWidth") or tags.get("EXIF ExifImageWidth")
+            h = tags.get("Image ImageLength") or tags.get("EXIF ExifImageLength")
+            if w:
+                metadata["width"] = int(str(w))
+            if h:
+                metadata["height"] = int(str(h))
+
+            # Make / Model
+            make = tags.get("Image Make")
+            model = tags.get("Image Model")
+            if make:
+                metadata["make"] = str(make).strip()
+            if model:
+                metadata["model"] = str(model).strip()
+
+            # Orientation
+            orient = tags.get("Image Orientation")
+            if orient:
+                # exifread returns "Rotated 90 CW" etc. — map to int
+                orient_str = str(orient)
+                orient_map = {
+                    "Horizontal (normal)": 1, "Mirrored horizontal": 2,
+                    "Rotated 180": 3, "Mirrored vertical": 4,
+                    "Mirrored horizontal then rotated 90 CCW": 5,
+                    "Rotated 90 CW": 6, "Mirrored horizontal then rotated 90 CW": 7,
+                    "Rotated 90 CCW": 8,
+                }
+                metadata["orientation"] = orient_map.get(orient_str, 1)
+
+            # Focal length (raw mm)
+            fl = tags.get("EXIF FocalLength")
+            if fl:
+                val = fl.values[0] if hasattr(fl, "values") else fl
+                if hasattr(val, "num") and hasattr(val, "den"):
+                    metadata["focal_length"] = float(val.num) / float(val.den) if val.den else None
+                else:
+                    try:
+                        metadata["focal_length"] = float(str(val))
+                    except (ValueError, TypeError):
+                        pass
+
+            # 35mm equivalent
+            fl35 = tags.get("EXIF FocalLengthIn35mmFilm")
+            if fl35:
+                try:
+                    metadata["focal_length_35mm"] = float(str(fl35))
+                except (ValueError, TypeError):
+                    pass
+
+            # DateTime
+            for tag_key, meta_key in [
+                ("EXIF DateTimeOriginal", "datetime_original"),
+                ("Image DateTime", "datetime"),
+                ("EXIF DateTimeDigitized", "datetime"),
+            ]:
+                dt_tag = tags.get(tag_key)
+                if dt_tag and metadata.get(meta_key) is None:
+                    try:
+                        metadata[meta_key] = datetime.strptime(
+                            str(dt_tag), "%Y:%m:%d %H:%M:%S"
+                        ).isoformat()
+                    except (ValueError, TypeError):
+                        pass
+
+            # Exposure time
+            et = tags.get("EXIF ExposureTime")
+            if et:
+                val = et.values[0] if hasattr(et, "values") else et
+                if hasattr(val, "num") and hasattr(val, "den"):
+                    metadata["exposure_time"] = float(val.num) / float(val.den) if val.den else None
+                else:
+                    try:
+                        metadata["exposure_time"] = float(str(val))
+                    except (ValueError, TypeError):
+                        pass
+
+            # ISO
+            iso = tags.get("EXIF ISOSpeedRatings")
+            if iso:
+                try:
+                    metadata["iso"] = int(str(iso))
+                except (ValueError, TypeError):
+                    pass
+
+            # If we got valid data, return it
+            if metadata["width"] > 0 and metadata["height"] > 0:
+                return metadata
+
+    except ImportError:
+        pass  # exifread not installed, fall through to Pillow
+    except Exception as e:
+        logger.debug("exifread failed for %s: %s, trying Pillow", photo_path.name, e)
+
+    # ── Fallback: Pillow (for formats exifread can't handle) ──
     try:
         import PIL.Image
         from PIL.ExifTags import TAGS
 
-        # Allow very large images
         PIL.Image.MAX_IMAGE_PIXELS = None
-
-        # PIL.Image.open() is lazy — doesn't load pixels.
-        # But we must NOT call .load() or access pixel data.
         img = PIL.Image.open(photo_path)
+        metadata["width"] = img.width
+        metadata["height"] = img.height
 
-        # Get dimensions from header (no pixel loading)
-        width, height = img.size
-
-        # Extract EXIF tags — for DNG/TIFF this reads the IFD without
-        # decoding the raw mosaic. For JPEG it reads the APP1 marker.
         try:
             exif_raw = img._getexif() or {}
         except Exception:
             exif_raw = {}
-
-        # Close immediately to release file handle (no pixel decode)
         img.close()
 
         exif = {}
@@ -124,78 +227,40 @@ def _extract_exif(photo_path: Path) -> dict[str, Any]:
             tag_name = TAGS.get(tag_id, str(tag_id))
             exif[tag_name] = value
 
-        metadata: dict[str, Any] = {
-            "width": width,
-            "height": height,
-            "focal_length": None,
-            "focal_length_35mm": None,
-            "datetime": None,
-            "datetime_original": None,
-            "exposure_time": None,
-            "iso": None,
-            "make": exif.get("Make", ""),
-            "model": exif.get("Model", ""),
-            "orientation": exif.get("Orientation", 1),
-        }
+        if not metadata["make"]:
+            metadata["make"] = exif.get("Make", "")
+        if not metadata["model"]:
+            metadata["model"] = exif.get("Model", "")
 
-        # Focal length (raw mm)
         fl = exif.get("FocalLength")
-        if fl is not None:
+        if fl is not None and metadata["focal_length"] is None:
             if hasattr(fl, "numerator"):
                 metadata["focal_length"] = float(fl.numerator) / float(fl.denominator)
             else:
                 metadata["focal_length"] = float(fl)
 
-        # 35mm equivalent
         fl35 = exif.get("FocalLengthIn35mmFilm")
-        if fl35 is not None:
+        if fl35 is not None and metadata["focal_length_35mm"] is None:
             metadata["focal_length_35mm"] = float(fl35)
 
-        # DateTime tags
         for tag_key, meta_key in [
             ("DateTimeOriginal", "datetime_original"),
             ("DateTime", "datetime"),
-            ("DateTimeDigitized", "datetime"),
         ]:
             dt_str = exif.get(tag_key)
             if dt_str and metadata.get(meta_key) is None:
                 try:
-                    # EXIF format: "2025:01:15 14:30:22"
                     metadata[meta_key] = datetime.strptime(
                         str(dt_str), "%Y:%m:%d %H:%M:%S"
                     ).isoformat()
                 except (ValueError, TypeError):
                     pass
 
-        # Exposure time
-        et = exif.get("ExposureTime")
-        if et is not None:
-            if hasattr(et, "numerator"):
-                metadata["exposure_time"] = float(et.numerator) / float(et.denominator)
-            else:
-                metadata["exposure_time"] = float(et)
-
-        # ISO
-        iso = exif.get("ISOSpeedRatings")
-        if iso is not None:
-            if isinstance(iso, (list, tuple)):
-                metadata["iso"] = int(iso[0])
-            else:
-                metadata["iso"] = int(iso)
-
-        img.close()
         return metadata
 
     except Exception as e:
         logger.warning("Failed to extract EXIF from %s: %s", photo_path, e)
-        return {
-            "width": 0, "height": 0,
-            "focal_length": None, "focal_length_35mm": None,
-            "datetime": None, "datetime_original": None,
-            "exposure_time": None, "iso": None,
-            "make": "", "model": "",
-            "orientation": 1,
-        }
+        return metadata
 
 
 def _probe_video(video_path: Path) -> dict[str, Any]:
