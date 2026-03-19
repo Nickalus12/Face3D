@@ -116,6 +116,31 @@ fn now_timestamp() -> String {
     chrono::Local::now().format("%H:%M:%S%.3f").to_string()
 }
 
+/// Find the VS 2022 cl.exe directory for CUDA JIT compilation.
+fn find_msvc_cl() -> Option<String> {
+    let base = std::path::Path::new(
+        "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC",
+    );
+    if !base.exists() {
+        return None;
+    }
+    // Find the latest MSVC version
+    let mut versions: Vec<_> = std::fs::read_dir(base)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .collect();
+    versions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+
+    for ver in versions {
+        let cl = ver.path().join("bin/Hostx64/x64/cl.exe");
+        if cl.exists() {
+            return cl.parent().map(|p| p.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 // ── Commands ─────────────────────────────────────────────────────
 
 #[command]
@@ -135,6 +160,19 @@ pub async fn start_pipeline(
 
     let script = format!("{}/scripts/run_pipeline.py", PROJECT_ROOT);
 
+    // Build PATH with CUDA bin + VS 2022 cl.exe for gsplat CUDA JIT compilation
+    let cuda_bin = format!("{}/bin", CUDA_HOME);
+    let msvc_cl = find_msvc_cl();
+    let mut path_env = std::env::var("PATH").unwrap_or_default();
+    if !path_env.contains(&cuda_bin) {
+        path_env = format!("{};{}", cuda_bin, path_env);
+    }
+    if let Some(ref cl_dir) = msvc_cl {
+        if !path_env.contains(cl_dir.as_str()) {
+            path_env = format!("{};{}", cl_dir, path_env);
+        }
+    }
+
     let mut child = Command::new(PYTHON_EXE)
         .arg("-u") // unbuffered output
         .arg(&script)
@@ -144,6 +182,7 @@ pub async fn start_pipeline(
         .arg(&session)
         .env("CUDA_HOME", CUDA_HOME)
         .env("TORCH_CUDA_ARCH_LIST", "8.6")
+        .env("PATH", &path_env)
         .current_dir(PROJECT_ROOT)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -1,17 +1,19 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, lazy, Suspense } from 'react';
 import Sidebar, { type ViewId } from './components/Sidebar';
-import Viewer3D from './components/Viewer3D';
-import { Gallery } from './components/Gallery';
-import SensorPanel from './components/SensorPanel';
-import CameraTrajectory from './components/CameraTrajectory';
-import CompareView from './components/CompareView';
-import SettingsPanel from './components/SettingsPanel';
 import StatusBar from './components/StatusBar';
 import KeyboardShortcuts from './components/KeyboardShortcuts';
 import TopBar from './components/TopBar';
 import WelcomeScreen from './components/WelcomeScreen';
-import { TrainingMetrics } from './components/TrainingMetrics';
-import PipelineView from './components/PipelineView';
+
+// Lazy-load heavy components (Three.js, recharts, etc.) — only load when needed
+const Viewer3D = lazy(() => import('./components/Viewer3D'));
+const Gallery = lazy(() => import('./components/Gallery').then(m => ({ default: m.Gallery })));
+const SensorPanel = lazy(() => import('./components/SensorPanel'));
+const CameraTrajectory = lazy(() => import('./components/CameraTrajectory'));
+const CompareView = lazy(() => import('./components/CompareView'));
+const SettingsPanel = lazy(() => import('./components/SettingsPanel'));
+const TrainingMetrics = lazy(() => import('./components/TrainingMetrics').then(m => ({ default: m.TrainingMetrics })));
+const PipelineView = lazy(() => import('./components/PipelineView'));
 import {
   ChevronRight,
   ChevronLeft,
@@ -244,25 +246,33 @@ export default function App() {
                   onNewScan={handleNewScan}
                   onSelectSession={handleSelectSessionFromWelcome}
                 />
-              ) : activeView === 'pipeline' ? (
-                <PipelineView />
-              ) : activeView === 'gallery' ? (
-                <Gallery />
-              ) : activeView === 'settings' ? (
-                <SettingsPanel />
-              ) : activeView === 'sensors' ? (
-                <div className="h-full overflow-y-auto scrollbar-hide">
-                  <SensorPanel />
-                  <div className="px-6 pb-6">
-                    <CameraTrajectory />
-                  </div>
-                </div>
-              ) : activeView === 'compare' ? (
-                <CompareView />
-              ) : activeView === 'metrics' ? (
-                <TrainingMetrics />
               ) : (
-                <Viewer3D />
+                <Suspense fallback={
+                  <div className="flex-1 flex items-center justify-center bg-[#0a0a0b]">
+                    <div className="w-6 h-6 border-2 border-zinc-700 border-t-indigo-500 rounded-full animate-spin" />
+                  </div>
+                }>
+                  {activeView === 'pipeline' ? (
+                    <PipelineView />
+                  ) : activeView === 'gallery' ? (
+                    <Gallery />
+                  ) : activeView === 'settings' ? (
+                    <SettingsPanel />
+                  ) : activeView === 'sensors' ? (
+                    <div className="h-full overflow-y-auto scrollbar-hide">
+                      <SensorPanel />
+                      <div className="px-6 pb-6">
+                        <CameraTrajectory />
+                      </div>
+                    </div>
+                  ) : activeView === 'compare' ? (
+                    <CompareView />
+                  ) : activeView === 'metrics' ? (
+                    <TrainingMetrics />
+                  ) : (
+                    <Viewer3D />
+                  )}
+                </Suspense>
               )}
             </div>
           </div>

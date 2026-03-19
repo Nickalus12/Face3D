@@ -38,11 +38,11 @@ const useSessionStore = create<SessionState>((set, get) => ({
       // Use DB-backed listing (falls back to filesystem if DB not ready)
       const sessions = await listSessionsFromDb();
       const current = get().currentSession;
-      // Keep current selection if it still exists, otherwise auto-select first
-      const stillExists = current
-        ? sessions.find((s) => s.id === current.id)
+      // Keep current selection if it still exists, but don't auto-select
+      // (user should see welcome screen until they choose a session)
+      const selected = current
+        ? sessions.find((s) => s.id === current.id) ?? null
         : null;
-      const selected = stillExists ?? sessions[0] ?? null;
 
       set({
         sessions,
