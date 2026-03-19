@@ -54,10 +54,14 @@ depth:
 reconstruction:
   use_da3_unified: true  # When true, stage 6 uses DA3 to replace COLMAP+depth+alignment
   da3:
-    process_res: 504  # DA3 processing resolution (higher = better quality, more VRAM)
+    process_res: 0  # 0 = auto-select (336 for face close-ups, 504 for wide views)
     use_ray_pose: false  # Use ray-based pose estimation (alternative to camera decoder)
-    chunk_size: 8  # Frames per DA3 inference call (8 fits in 16GB VRAM at res=504)
-    conf_threshold: 0.3  # Minimum confidence for dense point cloud points
+    chunk_size: 16  # Frames per DA3 inference call (auto-halves on OOM, cached per session)
+    conf_threshold: 0.0  # 0.0 = adaptive percentile-based threshold (keeps top 70%)
+    conf_percentile: 30.0  # Percentile for adaptive threshold (lower = keep more points)
+    deduplicate: true  # Skip near-duplicate adjacent frames (perceptual hash)
+    dedup_threshold: 5  # Hamming distance threshold for dedup (lower = more aggressive)
+    use_streaming_ply: true  # Stream PLY writes to reduce peak memory
   colmap:
     binary: "D:/Projects/3D/COLMAP/COLMAP-3.9.1-windows-cuda/COLMAP.bat"
     camera_model: "OPENCV"
