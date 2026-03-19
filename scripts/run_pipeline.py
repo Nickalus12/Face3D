@@ -390,10 +390,14 @@ def _run_da3_unified_stage(config: dict, session: dict) -> bool:
         model_name = depth_cfg["da3_model"]
 
     da3_cfg = recon_cfg.get("da3", {})
-    process_res = da3_cfg.get("process_res", 504)
+    process_res = da3_cfg.get("process_res", 0)
     use_ray_pose = da3_cfg.get("use_ray_pose", False)
-    chunk_size = da3_cfg.get("chunk_size", 8)
-    conf_threshold = da3_cfg.get("conf_threshold", 0.3)
+    chunk_size = da3_cfg.get("chunk_size", 16)
+    conf_threshold = da3_cfg.get("conf_threshold", 0.0)
+    conf_percentile = da3_cfg.get("conf_percentile", 30.0)
+    deduplicate = da3_cfg.get("deduplicate", True)
+    dedup_threshold = da3_cfg.get("dedup_threshold", 5)
+    use_streaming_ply = da3_cfg.get("use_streaming_ply", True)
 
     summary = run_da3_unified(
         frames_dir=session["proc_dir"] / "frames_srgb",
@@ -403,6 +407,10 @@ def _run_da3_unified_stage(config: dict, session: dict) -> bool:
         use_ray_pose=use_ray_pose,
         chunk_size=chunk_size,
         conf_threshold=conf_threshold,
+        deduplicate=deduplicate,
+        dedup_threshold=dedup_threshold,
+        conf_percentile=conf_percentile,
+        use_streaming_ply=use_streaming_ply,
     )
 
     log.info("DA3 unified summary: %s", summary)
@@ -826,11 +834,46 @@ def stage_1_extract_frames(config: dict, session: dict) -> bool:
 
     log.info("Stage 1: Extracting frames from video...")
     from capture import extract_frames
+    import subprocess as _sp
 
     cap_cfg = config["capture"]
     frames_dir = session["proc_dir"] / "frames"
 
+    # Pre-convert 8K/4K video to 1080p for fast extraction
+    converted_videos = []
     for video_path in session["video_paths"]:
+        try:
+            probe_out = _sp.run(
+                ["ffprobe", "-v", "quiet", "-show_entries", "stream=width",
+                 "-of", "csv=p=0", str(video_path)],
+                capture_output=True, text=True, timeout=10,
+            )
+            width = int(probe_out.stdout.strip().split("\n")[0]) if probe_out.stdout.strip() else 0
+        except Exception:
+            width = 0
+
+        if width > 1920:
+            converted = session["proc_dir"] / "video_1080p.mp4"
+            if not converted.exists():
+                log.info("Stage 1: Pre-converting %dx video to 1080p (one-time, speeds up extraction 10x)...", width)
+                try:
+                    _sp.run([
+                        "ffmpeg", "-y", "-hwaccel", "cuda",
+                        "-i", str(video_path),
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+                        "-s", "1920x1080", "-an", str(converted),
+                    ], capture_output=True, timeout=120, check=True)
+                    log.info("Stage 1: Converted to 1080p in %s", converted)
+                except Exception as e:
+                    log.warning("Stage 1: 1080p conversion failed (%s), using original", e)
+                    converted = video_path
+            else:
+                log.info("Stage 1: Using existing 1080p conversion")
+            converted_videos.append(converted)
+        else:
+            converted_videos.append(video_path)
+
+    for video_path in converted_videos:
         if cap_cfg.get("motion_based", True):
             from capture.frame_extractor import extract_frames_motion_based
             extract_frames_motion_based(
