@@ -9,7 +9,7 @@ import {
   type PythonInfo,
   type SystemInfo,
   type GpuInfo,
-} from "../lib/tauri";
+} from "../lib/api";
 
 // ── Types ────────────────────────────────────────────────────────
 

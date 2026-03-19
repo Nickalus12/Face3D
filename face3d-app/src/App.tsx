@@ -8,21 +8,38 @@ import CompareView from './components/CompareView';
 import SettingsPanel from './components/SettingsPanel';
 import StatusBar from './components/StatusBar';
 import KeyboardShortcuts from './components/KeyboardShortcuts';
-import { ChevronRight, ChevronLeft, Terminal, Maximize2, Play, Pause } from 'lucide-react';
+import TopBar from './components/TopBar';
+import WelcomeScreen from './components/WelcomeScreen';
+import { TrainingMetrics } from './components/TrainingMetrics';
+import {
+  ChevronRight,
+  ChevronLeft,
+  Terminal,
+  Maximize2,
+  Play,
+  Pause,
+  GripVertical,
+} from 'lucide-react';
 import useSessionStore from './store/sessionStore';
 import usePipelineStore from './store/pipelineStore';
-import { onPipelineLog, onPipelineComplete } from './lib/tauri';
+import { onPipelineLog, onPipelineComplete, openFolder } from './lib/tauri';
 import ToastContainer from './components/Toast';
 import { DetailPanel } from './components/DetailPanel';
+import NewScanWizard from './components/NewScanWizard';
 
 export default function App() {
   const [activeView, setActiveView] = useState<ViewId>('view');
   const [isPanelOpen, setIsPanelOpen] = useState(true);
+  const [panelWidth, setPanelWidth] = useState(280);
   const [isConsoleOpen, setIsConsoleOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [prevView, setPrevView] = useState<ViewId | null>(null);
+  const [isTransitioning, setIsTransitioning] = useState(false);
   const consoleRef = useRef<HTMLDivElement>(null);
+  const isResizingRef = useRef(false);
 
-  const { fetchSessions } = useSessionStore();
+  const { fetchSessions, currentSession, selectSession } = useSessionStore();
   const {
     status,
     logs,
@@ -53,9 +70,7 @@ export default function App() {
 
     const completeUnsub = onPipelineComplete((exitCode) => {
       usePipelineStore.getState().onPipelineComplete(exitCode);
-      // Refresh sessions to pick up new output files
       useSessionStore.getState().fetchSessions();
-      // Flash window title bar on completion
       if (document.title) {
         const original = document.title;
         document.title = 'Pipeline Complete!';
@@ -85,14 +100,67 @@ export default function App() {
     }
   }, [logs.length, isConsoleOpen]);
 
-  // ── Keyboard shortcut handlers ──────────────────────────────
+  // ── View change with crossfade transition ───────────────────
   const handleViewChange = useCallback((view: ViewId) => {
-    setActiveView(view);
-  }, []);
+    if (view === activeView) return;
+    setIsTransitioning(true);
+    setPrevView(activeView);
+    setTimeout(() => {
+      setActiveView(view);
+      setTimeout(() => {
+        setIsTransitioning(false);
+        setPrevView(null);
+      }, 150);
+    }, 10);
+  }, [activeView]);
 
   const handleToggleConsole = useCallback(() => {
     setIsConsoleOpen((prev) => !prev);
   }, []);
+
+  // ── Draggable panel resize ──────────────────────────────────
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isResizingRef.current = true;
+    const startX = e.clientX;
+    const startWidth = panelWidth;
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      if (!isResizingRef.current) return;
+      const delta = moveEvent.clientX - startX;
+      const newWidth = Math.max(220, Math.min(startWidth + delta, 450));
+      setPanelWidth(newWidth);
+    };
+
+    const onMouseUp = () => {
+      isResizingRef.current = false;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, [panelWidth]);
+
+  const handleOpenProjectFolder = useCallback(() => {
+    openFolder('data/output');
+  }, []);
+
+  const handleNewScan = useCallback(() => {
+    setWizardOpen(true);
+  }, []);
+
+  const handleSelectSessionFromWelcome = useCallback((session: any) => {
+    selectSession(session);
+    setActiveView('view');
+  }, [selectSession]);
+
+  // Determine if we should show the welcome screen
+  const showWelcome = !currentSession && !isLoading;
 
   return (
     <div className="flex flex-col h-screen w-screen bg-[#0a0a0b] text-zinc-300 font-sans overflow-hidden selection:bg-indigo-500/30 noise-overlay">
@@ -102,14 +170,23 @@ export default function App() {
         onToggleConsole={handleToggleConsole}
       />
 
-      <div className="flex flex-1 overflow-hidden">
-        <Sidebar activeView={activeView} onViewChange={setActiveView} />
+      {/* Top toolbar */}
+      <TopBar
+        activeView={activeView}
+        onViewChange={handleViewChange}
+        onNewScan={handleNewScan}
+        onOpenFolder={handleOpenProjectFolder}
+      />
 
-        {/* Collapsible Detail Panel */}
+      <div className="flex flex-1 overflow-hidden">
+        <Sidebar activeView={activeView} onViewChange={handleViewChange} />
+
+        {/* Collapsible Detail Panel with draggable resize */}
         <div
-          className={`relative transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)] bg-[#0e0e11] border-r border-zinc-800/40 flex flex-col z-20 shrink-0 ${
-            isPanelOpen ? 'w-[280px] opacity-100' : 'w-0 opacity-0 overflow-hidden'
+          className={`relative bg-[#0e0e11] border-r border-zinc-800/40 flex flex-col z-20 shrink-0 transition-opacity duration-200 ease-out ${
+            isPanelOpen ? 'opacity-100' : 'w-0 opacity-0 overflow-hidden'
           }`}
+          style={isPanelOpen ? { width: `${panelWidth}px` } : undefined}
         >
           <DetailPanel isExpanded={isPanelOpen} onToggle={() => setIsPanelOpen(!isPanelOpen)} />
 
@@ -132,6 +209,16 @@ export default function App() {
               {isRunning ? 'Stop Pipeline' : 'Idle'}
             </button>
           </div>
+
+          {/* Resize handle — draggable right edge */}
+          {isPanelOpen && (
+            <div
+              onMouseDown={handleResizeStart}
+              className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize group z-30 flex items-center justify-center hover:bg-indigo-500/10 transition-colors duration-150"
+            >
+              <div className="w-px h-8 bg-zinc-700/50 group-hover:bg-indigo-500/50 transition-colors duration-150 rounded-full" />
+            </div>
+          )}
         </div>
 
         {/* Main Center Area */}
@@ -139,29 +226,42 @@ export default function App() {
           {/* Panel Toggle button */}
           <button
             onClick={() => setIsPanelOpen(!isPanelOpen)}
-            className="absolute top-5 left-4 z-20 p-1.5 bg-[#111113]/80 backdrop-blur-xl border border-white/10 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800/80 active:scale-90 transition-all duration-150 shadow-lg shadow-black/20"
+            className="absolute top-3 left-3 z-20 p-1.5 bg-[#111113]/80 backdrop-blur-xl border border-white/10 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800/80 active:scale-90 transition-all duration-150 shadow-lg shadow-black/20"
           >
             {isPanelOpen ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
           </button>
 
-          {/* Main Content — switches on active view */}
-          <div className="flex-1 relative rounded-tl-xl overflow-hidden border-t border-l border-white/5">
-            {activeView === 'gallery' ? (
-              <Gallery />
-            ) : activeView === 'settings' ? (
-              <SettingsPanel />
-            ) : activeView === 'sensors' ? (
-              <div className="h-full overflow-y-auto scrollbar-hide">
-                <SensorPanel />
-                <div className="px-6 pb-6">
-                  <CameraTrajectory />
+          {/* Main Content — switches on active view with crossfade */}
+          <div className="flex-1 relative overflow-hidden">
+            <div
+              className={`absolute inset-0 transition-opacity duration-150 ease-out ${
+                isTransitioning ? 'opacity-0' : 'opacity-100'
+              }`}
+            >
+              {showWelcome ? (
+                <WelcomeScreen
+                  onNewScan={handleNewScan}
+                  onSelectSession={handleSelectSessionFromWelcome}
+                />
+              ) : activeView === 'gallery' ? (
+                <Gallery />
+              ) : activeView === 'settings' ? (
+                <SettingsPanel />
+              ) : activeView === 'sensors' ? (
+                <div className="h-full overflow-y-auto scrollbar-hide">
+                  <SensorPanel />
+                  <div className="px-6 pb-6">
+                    <CameraTrajectory />
+                  </div>
                 </div>
-              </div>
-            ) : activeView === 'compare' ? (
-              <CompareView />
-            ) : (
-              <Viewer3D />
-            )}
+              ) : activeView === 'compare' ? (
+                <CompareView />
+              ) : activeView === 'metrics' ? (
+                <TrainingMetrics />
+              ) : (
+                <Viewer3D />
+              )}
+            </div>
           </div>
 
           {/* Console Trigger Button (when closed) */}
@@ -186,8 +286,10 @@ export default function App() {
 
           {/* Animated Bottom Console */}
           <div
-            className={`absolute bottom-0 left-0 right-0 transition-transform duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] z-30 flex flex-col bg-[#0d0d0f]/95 backdrop-blur-2xl border-t border-white/10 rounded-t-2xl shadow-[0_-20px_40px_rgba(0,0,0,0.5)] ${
-              isConsoleOpen ? 'translate-y-0' : 'translate-y-full'
+            className={`absolute bottom-0 left-0 right-0 transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] z-30 flex flex-col bg-[#0d0d0f]/95 backdrop-blur-2xl border-t border-white/10 rounded-t-2xl shadow-[0_-20px_40px_rgba(0,0,0,0.5)] ${
+              isConsoleOpen
+                ? 'translate-y-0 opacity-100'
+                : 'translate-y-full opacity-0'
             }`}
             style={{ height: '240px' }}
           >
@@ -217,7 +319,7 @@ export default function App() {
             </div>
             <div
               ref={consoleRef}
-              className="p-4 font-mono text-[11px] leading-relaxed text-zinc-400 flex-1 overflow-y-auto scrollbar-hide space-y-0.5"
+              className="p-4 font-mono text-[11px] leading-6 text-zinc-400 flex-1 overflow-y-auto scrollbar-hide space-y-0.5"
             >
               {logs.length === 0 ? (
                 <div className="text-zinc-600 italic">No logs yet. Start the pipeline to see output.</div>
@@ -238,6 +340,9 @@ export default function App() {
                     );
                   }
 
+                  // Format timestamp to HH:MM:SS
+                  const shortTimestamp = log.timestamp.slice(0, 8);
+
                   return (
                     <div
                       key={i}
@@ -253,7 +358,7 @@ export default function App() {
                           : 'text-zinc-400'
                       }`}
                     >
-                      <span className="text-zinc-700 opacity-60">[{log.timestamp}]</span> {log.message}
+                      <span className="text-zinc-700 opacity-60 text-[10px]">[{shortTimestamp}]</span> {log.message}
                     </div>
                   );
                 })
@@ -265,6 +370,9 @@ export default function App() {
 
       <StatusBar />
       <ToastContainer />
+
+      {/* New Scan Wizard Modal */}
+      <NewScanWizard isOpen={wizardOpen} onClose={() => setWizardOpen(false)} />
     </div>
   );
 }

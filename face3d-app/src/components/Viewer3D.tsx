@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, Grid, Sparkles } from '@react-three/drei';
+import { OrbitControls, Grid, Sparkles, GizmoHelper, GizmoViewport } from '@react-three/drei';
 import {
   Layers,
   SlidersHorizontal,
@@ -10,6 +10,13 @@ import {
   RotateCcw,
   Eye,
   Box,
+  User,
+  MoveHorizontal,
+  ArrowUp,
+  RotateCw,
+  Palette,
+  AlertTriangle,
+  RefreshCw,
 } from 'lucide-react';
 import * as THREE from 'three';
 import { readFile } from '@tauri-apps/plugin-fs';
@@ -20,6 +27,7 @@ import { loadPlyFromBytes, type PlyData } from '../lib/plyLoader';
 // ── Types ──────────────────────────────────────────────────────
 
 type ViewMode = 'points' | 'mesh';
+type BgMode = 'dark' | 'light' | 'gradient' | 'transparent';
 
 interface ModelInfo {
   path: string;
@@ -27,6 +35,30 @@ interface ModelInfo {
   plyData: PlyData | null;
   error: string | null;
 }
+
+interface ViewPreset {
+  id: string;
+  label: string;
+  icon: typeof User;
+  position: [number, number, number];
+}
+
+const VIEW_PRESETS: ViewPreset[] = [
+  { id: 'front', label: 'Front', icon: User, position: [0, 1, 3] },
+  { id: 'side', label: 'Side', icon: MoveHorizontal, position: [3, 1, 0] },
+  { id: 'top', label: 'Top', icon: ArrowUp, position: [0, 4, 0.1] },
+  { id: 'threequarter', label: '3/4', icon: RotateCw, position: [2, 1.5, 2] },
+];
+
+const BG_OPTIONS: { id: BgMode; label: string }[] = [
+  { id: 'dark', label: 'Dark' },
+  { id: 'light', label: 'Light' },
+  { id: 'gradient', label: 'Gradient' },
+  { id: 'transparent', label: 'None' },
+];
+
+// Stored camera positions per session
+const cameraStateCache = new Map<string, { position: THREE.Vector3; target: THREE.Vector3 }>();
 
 // ── Point Cloud Component ──────────────────────────────────────
 
@@ -65,13 +97,24 @@ function PointCloud({
 
 // ── Auto-fit camera to the model ──────────────────────────────
 
-function AutoFit({ plyData }: { plyData: PlyData }) {
+function AutoFit({ plyData, sessionId }: { plyData: PlyData; sessionId?: string }) {
   const { camera } = useThree();
   const fitted = useRef(false);
 
   useEffect(() => {
     if (fitted.current) return;
     fitted.current = true;
+
+    // Check if we have a cached camera position for this session
+    if (sessionId && cameraStateCache.has(sessionId)) {
+      const cached = cameraStateCache.get(sessionId)!;
+      camera.position.copy(cached.position);
+      camera.lookAt(cached.target);
+      if (camera instanceof THREE.PerspectiveCamera) {
+        camera.updateProjectionMatrix();
+      }
+      return;
+    }
 
     // Compute bounding box
     const positions = plyData.positions;
@@ -99,7 +142,6 @@ function AutoFit({ plyData }: { plyData: PlyData }) {
     const size = new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ);
     const maxDim = Math.max(size.x, size.y, size.z);
 
-    // Position camera to see the whole model
     const distance = maxDim * 1.8;
     camera.position.set(center.x, center.y, center.z + distance);
     camera.lookAt(center);
@@ -109,7 +151,25 @@ function AutoFit({ plyData }: { plyData: PlyData }) {
       camera.far = distance * 100;
       camera.updateProjectionMatrix();
     }
-  }, [plyData, camera]);
+  }, [plyData, camera, sessionId]);
+
+  return null;
+}
+
+// ── Camera State Saver ────────────────────────────────────────
+
+function CameraSaver({ sessionId }: { sessionId?: string }) {
+  const { camera } = useThree();
+  const controlsRef = useRef<any>(null);
+
+  useFrame(() => {
+    if (sessionId) {
+      cameraStateCache.set(sessionId, {
+        position: camera.position.clone(),
+        target: new THREE.Vector3(0, 0, 0), // simplified
+      });
+    }
+  });
 
   return null;
 }
@@ -122,6 +182,41 @@ function CameraTracker({ onUpdate }: { onUpdate: (pos: THREE.Vector3) => void })
   useFrame(() => {
     onUpdate(camera.position.clone());
   });
+
+  return null;
+}
+
+// ── Double-click focus ────────────────────────────────────────
+
+function DoubleClickFocus({ controlsRef }: { controlsRef: React.RefObject<any> }) {
+  const { camera, raycaster, scene } = useThree();
+
+  useEffect(() => {
+    const canvas = document.querySelector('canvas');
+    if (!canvas) return;
+
+    const handleDblClick = (event: MouseEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObjects(scene.children, true);
+
+      if (intersects.length > 0) {
+        const point = intersects[0].point;
+        if (controlsRef.current) {
+          controlsRef.current.target.copy(point);
+          controlsRef.current.update();
+        }
+      }
+    };
+
+    canvas.addEventListener('dblclick', handleDblClick);
+    return () => canvas.removeEventListener('dblclick', handleDblClick);
+  }, [camera, raycaster, scene, controlsRef]);
 
   return null;
 }
@@ -203,12 +298,25 @@ function formatBytes(bytes: number): string {
   return bytes + ' B';
 }
 
+// ── BG class helper ────────────────────────────────────────────
+
+function getBgClass(bg: BgMode): string {
+  switch (bg) {
+    case 'light': return 'bg-zinc-300';
+    case 'gradient': return 'bg-gradient-to-b from-[#0a0a1a] via-[#0d1017] to-[#050505]';
+    case 'transparent': return 'bg-transparent';
+    default: return 'bg-[#0a0a0b]';
+  }
+}
+
 // ── Main Viewer Component ──────────────────────────────────────
 
 export default function Viewer3D() {
   const [pointSize, setPointSize] = useState(0.005);
   const [ghostMode, setGhostMode] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('points');
+  const [bgMode, setBgMode] = useState<BgMode>('gradient');
+  const [showBgPicker, setShowBgPicker] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [cameraPos, setCameraPos] = useState(new THREE.Vector3(0, 1.2, 3.5));
@@ -228,7 +336,6 @@ export default function Viewer3D() {
         return;
       }
 
-      // Only try to load if the session has gaussians or mesh
       if (!currentSession.has_gaussians && !currentSession.has_mesh) {
         setModelInfo(null);
         setLoadError(null);
@@ -250,13 +357,11 @@ export default function Viewer3D() {
 
         const fileName = modelPath.split(/[/\\]/).pop() ?? 'unknown';
 
-        // Use Tauri fs plugin to read binary file
         const bytes = await readFile(modelPath);
         if (cancelled) return;
 
         if (fileName.endsWith('.ply')) {
           const plyData = loadPlyFromBytes(bytes);
-
           if (cancelled) return;
 
           setModelInfo({
@@ -266,12 +371,10 @@ export default function Viewer3D() {
             error: null,
           });
 
-          // Auto-select view mode based on file type
           if (fileName === 'gaussians.ply') {
             setViewMode('points');
           }
         } else {
-          // OBJ or other — not yet supported as point cloud
           setModelInfo({
             path: modelPath,
             fileName,
@@ -304,9 +407,57 @@ export default function Viewer3D() {
     }
   }, []);
 
+  const handleViewPreset = useCallback((preset: ViewPreset) => {
+    if (controlsRef.current) {
+      const controls = controlsRef.current;
+      // Animate to preset position
+      controls.object.position.set(...preset.position);
+      controls.target.set(0, 1, 0);
+      controls.update();
+    }
+  }, []);
+
   const handleCameraUpdate = useCallback((pos: THREE.Vector3) => {
     setCameraPos(pos);
   }, []);
+
+  const handleFullscreen = useCallback(() => {
+    const el = document.querySelector('.viewer3d-container');
+    if (!el) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      el.requestFullscreen();
+    }
+  }, []);
+
+  const handleRetryLoad = useCallback(() => {
+    // Force a re-load by toggling session dependency
+    setLoadError(null);
+    setIsLoading(true);
+    // Re-trigger the effect
+    if (currentSession) {
+      getModelPath(currentSession.id).then(async (modelPath) => {
+        if (!modelPath) {
+          setIsLoading(false);
+          setLoadError('No model file found');
+          return;
+        }
+        try {
+          const fileName = modelPath.split(/[/\\]/).pop() ?? 'unknown';
+          const bytes = await readFile(modelPath);
+          if (fileName.endsWith('.ply')) {
+            const plyData = loadPlyFromBytes(bytes);
+            setModelInfo({ path: modelPath, fileName, plyData, error: null });
+          }
+        } catch (err) {
+          setLoadError(err instanceof Error ? err.message : String(err));
+        } finally {
+          setIsLoading(false);
+        }
+      });
+    }
+  }, [currentSession]);
 
   const cameraDistance = cameraPos.length();
   const hasModel = modelInfo?.plyData != null;
@@ -320,12 +471,12 @@ export default function Viewer3D() {
     !currentSession?.has_mesh;
 
   return (
-    <div className="w-full h-full relative bg-gradient-to-b from-[#0a0a1a] via-[#0d1017] to-[#050505]">
+    <div className={`viewer3d-container w-full h-full relative ${getBgClass(bgMode)}`}>
       {/* Floating Toolbar */}
-      <div className="absolute top-5 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 p-1 bg-[#111113]/80 backdrop-blur-2xl border border-white/10 rounded-xl shadow-2xl">
+      <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 p-1 bg-[#111113]/80 backdrop-blur-2xl border border-white/10 rounded-xl shadow-2xl">
         {/* View mode toggle */}
         <button
-          className={`p-2 rounded-lg transition-all ${
+          className={`p-2 rounded-lg transition-all duration-150 ${
             viewMode === 'points'
               ? 'bg-indigo-500/20 text-indigo-400'
               : 'text-zinc-400 hover:text-white hover:bg-white/5'
@@ -336,7 +487,7 @@ export default function Viewer3D() {
           <Eye size={16} />
         </button>
         <button
-          className={`p-2 rounded-lg transition-all ${
+          className={`p-2 rounded-lg transition-all duration-150 ${
             viewMode === 'mesh'
               ? 'bg-indigo-500/20 text-indigo-400'
               : 'text-zinc-400 hover:text-white hover:bg-white/5'
@@ -350,7 +501,7 @@ export default function Viewer3D() {
         <div className="w-[1px] h-4 bg-white/10 mx-2" />
 
         <button
-          className={`p-2 rounded-lg transition-all ${
+          className={`p-2 rounded-lg transition-all duration-150 ${
             ghostMode
               ? 'bg-indigo-500/20 text-indigo-400'
               : 'text-zinc-400 hover:text-white hover:bg-white/5'
@@ -385,15 +536,48 @@ export default function Viewer3D() {
 
         <div className="w-[1px] h-4 bg-white/10 mx-2" />
 
+        {/* Background picker */}
+        <div className="relative">
+          <button
+            className={`p-2 rounded-lg transition-all duration-150 ${
+              showBgPicker
+                ? 'bg-indigo-500/20 text-indigo-400'
+                : 'text-zinc-400 hover:text-white hover:bg-white/5'
+            }`}
+            onClick={() => setShowBgPicker(!showBgPicker)}
+            title="Background"
+          >
+            <Palette size={16} />
+          </button>
+          {showBgPicker && (
+            <div className="absolute top-full mt-2 right-0 bg-[#111113]/95 backdrop-blur-xl border border-white/10 rounded-lg p-1.5 shadow-2xl min-w-[120px] animate-scaleIn">
+              {BG_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  onClick={() => { setBgMode(opt.id); setShowBgPicker(false); }}
+                  className={`w-full text-left px-3 py-1.5 rounded-md text-xs transition-all duration-150 ${
+                    bgMode === opt.id
+                      ? 'bg-indigo-500/20 text-indigo-300'
+                      : 'text-zinc-400 hover:text-white hover:bg-white/5'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
         <button
-          className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5 transition-all"
+          className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5 transition-all duration-150"
           onClick={handleResetCamera}
           title="Reset Camera"
         >
           <RotateCcw size={16} />
         </button>
         <button
-          className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5 transition-all"
+          className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5 transition-all duration-150"
+          onClick={handleFullscreen}
           title="Fullscreen View"
         >
           <Maximize size={16} />
@@ -401,7 +585,7 @@ export default function Viewer3D() {
       </div>
 
       {/* HUD Overlays */}
-      <div className="absolute top-5 right-5 z-10 flex flex-col gap-2 pointer-events-none">
+      <div className="absolute top-4 right-4 z-10 flex flex-col gap-2 pointer-events-none">
         {hasModel && modelInfo?.plyData && (
           <>
             <div className="bg-[#0a0a0b]/60 backdrop-blur-xl px-3 py-2 rounded-lg border border-white/5 shadow-2xl flex items-center justify-between gap-6 w-44">
@@ -442,8 +626,42 @@ export default function Viewer3D() {
         )}
       </div>
 
+      {/* Bottom Toolbar — View Presets */}
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 p-1 bg-[#111113]/80 backdrop-blur-2xl border border-white/10 rounded-xl shadow-2xl">
+        {VIEW_PRESETS.map((preset) => {
+          const Icon = preset.icon;
+          return (
+            <button
+              key={preset.id}
+              onClick={() => handleViewPreset(preset)}
+              className="px-3 py-1.5 rounded-lg text-[11px] font-medium text-zinc-400 hover:text-white hover:bg-white/5 transition-all duration-150 flex items-center gap-1.5 active:scale-95"
+              title={preset.label}
+            >
+              <Icon size={13} />
+              {preset.label}
+            </button>
+          );
+        })}
+        <div className="w-[1px] h-4 bg-white/10 mx-1" />
+        <button
+          onClick={handleResetCamera}
+          className="px-3 py-1.5 rounded-lg text-[11px] font-medium text-zinc-400 hover:text-white hover:bg-white/5 transition-all duration-150 flex items-center gap-1.5 active:scale-95"
+          title="Reset View"
+        >
+          <RotateCcw size={13} />
+          Reset
+        </button>
+        <button
+          onClick={handleFullscreen}
+          className="px-3 py-1.5 rounded-lg text-[11px] font-medium text-zinc-400 hover:text-white hover:bg-white/5 transition-all duration-150 flex items-center gap-1.5 active:scale-95"
+          title="Fullscreen"
+        >
+          <Maximize size={13} />
+        </button>
+      </div>
+
       {/* Branding */}
-      <div className="absolute bottom-6 left-6 z-10 pointer-events-none">
+      <div className="absolute bottom-14 left-4 z-10 pointer-events-none">
         <div className="text-2xl font-black text-white/5 tracking-tighter uppercase select-none">
           Face3D Engine
         </div>
@@ -452,7 +670,7 @@ export default function Viewer3D() {
         </div>
       </div>
 
-      {/* Loading overlay */}
+      {/* Loading overlay with skeleton */}
       {isLoading && (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div className="flex flex-col items-center gap-4">
@@ -463,21 +681,33 @@ export default function Viewer3D() {
             <div className="text-xs text-zinc-500">
               Parsing PLY binary data
             </div>
+            {/* Skeleton loader bars */}
+            <div className="w-48 space-y-2">
+              <div className="h-2 skeleton rounded-full" />
+              <div className="h-2 skeleton rounded-full w-3/4" />
+              <div className="h-2 skeleton rounded-full w-1/2" />
+            </div>
           </div>
         </div>
       )}
 
-      {/* Error overlay */}
+      {/* Error overlay with retry */}
       {loadError && !isLoading && (
         <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
-          <div className="flex flex-col items-center gap-3 p-6 bg-red-950/40 backdrop-blur-xl border border-red-500/20 rounded-2xl max-w-sm">
-            <FileQuestion size={32} className="text-red-400" />
+          <div className="flex flex-col items-center gap-3 p-6 bg-red-950/40 backdrop-blur-xl border border-red-500/20 rounded-2xl max-w-sm pointer-events-auto">
+            <AlertTriangle size={32} className="text-red-400" />
             <div className="text-sm text-red-300 font-medium text-center">
               Failed to load model
             </div>
             <div className="text-xs text-red-400/70 text-center">
               {loadError}
             </div>
+            <button
+              onClick={handleRetryLoad}
+              className="mt-2 flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium bg-red-500/10 text-red-300 border border-red-500/20 hover:bg-red-500/20 transition-all duration-150 active:scale-95"
+            >
+              <RefreshCw size={13} /> Retry
+            </button>
           </div>
         </div>
       )}
@@ -503,7 +733,7 @@ export default function Viewer3D() {
         gl={{
           antialias: true,
           toneMapping: THREE.ACESFilmicToneMapping,
-          alpha: true,
+          alpha: bgMode === 'transparent',
         }}
       >
         <ambientLight intensity={0.3} />
@@ -533,6 +763,14 @@ export default function Viewer3D() {
           cellThickness={0.5}
         />
 
+        {/* Axis Gizmo */}
+        <GizmoHelper alignment="bottom-left" margin={[60, 60]}>
+          <GizmoViewport
+            axisColors={['#ef4444', '#22c55e', '#3b82f6']}
+            labelColor="#fff"
+          />
+        </GizmoHelper>
+
         {/* Model or placeholder */}
         {hasModel && modelInfo?.plyData ? (
           <>
@@ -541,13 +779,15 @@ export default function Viewer3D() {
               pointSize={pointSize}
               ghostMode={ghostMode}
             />
-            <AutoFit plyData={modelInfo.plyData} />
+            <AutoFit plyData={modelInfo.plyData} sessionId={currentSession?.id} />
           </>
         ) : (
           <SyntheticCloud pointSize={0.015} ghostMode={ghostMode} />
         )}
 
         <CameraTracker onUpdate={handleCameraUpdate} />
+        <CameraSaver sessionId={currentSession?.id} />
+        <DoubleClickFocus controlsRef={controlsRef} />
 
         <OrbitControls
           ref={controlsRef}

@@ -123,7 +123,8 @@ const StatCard: React.FC<{
 
 export const TrainingMetrics: React.FC = () => {
   const [timeRange, setTimeRange] = useState('all');
-  const { metrics, gpuInfo } = usePipelineStore();
+  const { metrics, gpuInfo, status } = usePipelineStore();
+  const isTraining = status === 'running';
 
   // Filter data by time range
   const getData = () => {
@@ -190,6 +191,15 @@ export const TrainingMetrics: React.FC = () => {
           <h1 className="text-2xl font-light text-zinc-100 flex items-center gap-3">
             <Activity className="text-emerald-500" />
             Training Metrics
+            {isTraining && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-60" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+                </span>
+                LIVE
+              </span>
+            )}
           </h1>
           <p className="text-sm text-zinc-500 mt-1">
             {metrics.length > 0
@@ -215,8 +225,8 @@ export const TrainingMetrics: React.FC = () => {
         </div>
       </div>
 
-      {/* Summary Stat Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8 animate-slideUp">
+      {/* Summary Stat Cards — 1 col on narrow, 2 on medium, 4 on wide */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-8 animate-slideUp">
         <StatCard
           label="PSNR"
           value={latestPsnr != null ? latestPsnr.toFixed(2) : '--'}
@@ -254,8 +264,8 @@ export const TrainingMetrics: React.FC = () => {
         />
       </div>
 
-      {/* Chart Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      {/* Chart Grid — 1 col on narrow, 2 on wide */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
 
         {/* PSNR Chart */}
         <div className={`bg-zinc-900/30 border border-zinc-800/60 rounded-2xl p-6 transition-all duration-500 ${psnrImproving ? 'shadow-[0_0_20px_rgba(16,185,129,0.06)]' : ''}`}>
@@ -326,7 +336,7 @@ export const TrainingMetrics: React.FC = () => {
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
                   <XAxis dataKey="iter" stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} />
-                  <YAxis stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} />
+                  <YAxis stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} domain={['auto', 'auto']} />
                   <Tooltip content={<CustomTooltip />} />
                   <Area
                     type="monotone" dataKey="loss" name="Loss"

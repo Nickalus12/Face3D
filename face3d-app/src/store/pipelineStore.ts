@@ -1,10 +1,10 @@
 import { create } from "zustand";
 import {
-  startPipeline as tauriStartPipeline,
-  stopPipeline as tauriStopPipeline,
-  getGpuInfo as tauriGetGpuInfo,
+  startPipeline as apiStartPipeline,
+  stopPipeline as apiStopPipeline,
+  getGpuInfo as apiGetGpuInfo,
   type GpuInfo,
-} from "../lib/tauri";
+} from "../lib/api";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -90,12 +90,14 @@ const usePipelineStore = create<PipelineState>((set, get) => ({
   setSessionName: (name) => set({ sessionName: name }),
 
   startPipeline: async (contentDir: string, session: string) => {
+    // ── Optimistic update ──────────────────────────────────────
+    // Immediately flip to "running" so the UI feels instant.
     set({
       status: "running",
       currentStage: 1,
       stages: PIPELINE_STAGES.map((s) => ({
         ...s,
-        status: "pending" as const,
+        status: s.id === 1 ? ("running" as const) : ("pending" as const),
       })),
       metrics: [],
       logs: [],
@@ -107,19 +109,21 @@ const usePipelineStore = create<PipelineState>((set, get) => ({
     get().addLog(`Starting pipeline for session: ${session}`, "info");
     get().addLog(`Content directory: ${contentDir}`, "info");
 
-    // Mark stage 1 as running
-    set((state) => ({
-      stages: state.stages.map((s) =>
-        s.id === 1 ? { ...s, status: "running" as const } : s,
-      ),
-    }));
-
     try {
-      await tauriStartPipeline(contentDir, session);
+      await apiStartPipeline(contentDir, session);
     } catch (e) {
+      // ── Revert optimistic state on failure ─────────────────
       const msg = e instanceof Error ? e.message : String(e);
       get().addLog(`Pipeline start failed: ${msg}`, "error");
-      set({ status: "error" });
+      set({
+        status: "idle",
+        currentStage: 0,
+        stages: PIPELINE_STAGES.map((s) => ({
+          ...s,
+          status: "pending" as const,
+        })),
+        startedAt: null,
+      });
     }
   },
 
@@ -127,9 +131,9 @@ const usePipelineStore = create<PipelineState>((set, get) => ({
     set({ status: "stopping" });
     get().addLog("Pipeline stop requested", "warn");
     try {
-      await tauriStopPipeline();
+      await apiStopPipeline();
     } catch {
-      // May fail if not running
+      // May fail if not running — non-critical
     }
     const { currentStage } = get();
     set((state) => ({
@@ -144,7 +148,7 @@ const usePipelineStore = create<PipelineState>((set, get) => ({
   },
 
   fetchGpuInfo: async () => {
-    const info = await tauriGetGpuInfo();
+    const info = await apiGetGpuInfo();
     if (info) {
       set({ gpuInfo: info });
     }
@@ -158,7 +162,6 @@ const usePipelineStore = create<PipelineState>((set, get) => ({
     };
     set((state) => {
       const logs = [...state.logs, entry];
-      // Keep only the last MAX_LOG_LINES
       if (logs.length > MAX_LOG_LINES) {
         return { logs: logs.slice(logs.length - MAX_LOG_LINES) };
       }
@@ -203,7 +206,6 @@ const usePipelineStore = create<PipelineState>((set, get) => ({
         stages: s.stages.map((st) => {
           if (st.id === stageNum)
             return { ...st, status: "running" as const };
-          // Mark all previous stages as complete if still pending/running
           if (st.id < stageNum && st.status !== "error" && st.status !== "skipped")
             return { ...st, status: "complete" as const };
           return st;

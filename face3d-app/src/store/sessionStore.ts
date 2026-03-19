@@ -3,7 +3,7 @@ import {
   listSessions,
   getSessionFiles,
   type Session,
-} from "../lib/tauri";
+} from "../lib/api";
 
 export interface SessionFile {
   name: string;

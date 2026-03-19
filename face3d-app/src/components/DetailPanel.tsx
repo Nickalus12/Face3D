@@ -16,10 +16,14 @@ import {
   Activity,
   Layers,
   Timer,
+  Search,
+  RefreshCw,
+  Clock,
 } from "lucide-react";
 import useSessionStore from "../store/sessionStore";
 import usePipelineStore, { PIPELINE_STAGES } from "../store/pipelineStore";
-import { openFolder } from "../lib/tauri";
+import { openFolder, listRenders } from "../lib/tauri";
+import { convertFileSrc } from "@tauri-apps/api/core";
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -47,6 +51,28 @@ function formatDuration(seconds: number): string {
   return `${m}m ${s.toString().padStart(2, "0")}s`;
 }
 
+function isTauri(): boolean {
+  return typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
+}
+
+// Average stage durations in seconds (historical estimates for RTX 3080)
+const STAGE_DURATION_ESTIMATES: Record<number, number> = {
+  1: 30,   // Frame Extraction
+  2: 45,   // Color Correction
+  3: 20,   // Quality Filtering
+  4: 10,   // IMU Parsing
+  5: 15,   // Rotation Priors
+  6: 300,  // COLMAP SfM
+  7: 120,  // Depth Estimation
+  8: 30,   // Depth Alignment
+  9: 25,   // Face Landmarks
+  10: 60,  // FLAME Fitting
+  11: 40,  // Face Segmentation
+  12: 15,  // Gaussian Init
+  13: 900, // Gaussian Training
+  14: 60,  // Export & Render
+};
+
 // ── Tab Indicator ─────────────────────────────────────────────
 
 const TABS: { id: TabId; label: string }[] = [
@@ -54,6 +80,50 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "pipeline", label: "Pipeline" },
   { id: "info", label: "Info" },
 ];
+
+// ── Session Thumbnail ─────────────────────────────────────────
+
+const SessionThumbnail: React.FC<{ sessionId: string; hasRenders: boolean }> = ({
+  sessionId,
+  hasRenders,
+}) => {
+  const [thumbSrc, setThumbSrc] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    if (!hasRenders || !isTauri()) return;
+    let cancelled = false;
+
+    listRenders(sessionId).then((renders) => {
+      if (cancelled || renders.length === 0) return;
+      try {
+        const src = convertFileSrc(renders[0]);
+        setThumbSrc(src);
+      } catch {
+        setError(true);
+      }
+    });
+
+    return () => { cancelled = true; };
+  }, [sessionId, hasRenders]);
+
+  if (thumbSrc && !error) {
+    return (
+      <img
+        src={thumbSrc}
+        alt=""
+        className="w-full h-full object-cover"
+        onError={() => setError(true)}
+      />
+    );
+  }
+
+  return hasRenders ? (
+    <ImageIcon size={20} className="text-zinc-600" />
+  ) : (
+    <Box size={20} className="text-zinc-700" />
+  );
+};
 
 // ── Component ─────────────────────────────────────────────────
 
@@ -63,6 +133,7 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<TabId>("sessions");
   const [expandedStage, setExpandedStage] = useState<number | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -77,7 +148,7 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
     sessionFiles,
     selectSession,
   } = useSessionStore();
-  const { stages, status, startedAt, metrics } = usePipelineStore();
+  const { stages, status, startedAt, metrics, startPipeline, contentDir } = usePipelineStore();
 
   const isRunning = status === "running";
 
@@ -149,19 +220,54 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
     return () => clearInterval(tick);
   }, [startedAt, isRunning]);
 
+  // ── Estimated remaining time ─────────────────────────────
+
+  const estimatedRemaining = (() => {
+    if (!isRunning) return null;
+    let remaining = 0;
+    for (const stage of stages) {
+      if (stage.status === "pending") {
+        remaining += STAGE_DURATION_ESTIMATES[stage.id] ?? 60;
+      }
+      if (stage.status === "running") {
+        // Estimate half of the stage duration remains
+        remaining += Math.floor((STAGE_DURATION_ESTIMATES[stage.id] ?? 60) * 0.5);
+      }
+    }
+    return remaining;
+  })();
+
+  // ── Filtered sessions ────────────────────────────────────
+
+  const filteredSessions = searchQuery.trim()
+    ? sessions.filter(
+        (s) =>
+          s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          s.id.toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    : sessions;
+
+  // ── Re-run pipeline handler ──────────────────────────────
+
+  const handleRerunPipeline = useCallback(async () => {
+    if (!currentSession || isRunning) return;
+    const dir = contentDir || `data/raw/${currentSession.id}`;
+    await startPipeline(dir, currentSession.id);
+  }, [currentSession, isRunning, contentDir, startPipeline]);
+
   if (!isExpanded) return null;
 
   return (
     <div className="flex flex-col h-full w-full">
       {/* Tab Bar */}
       <div className="relative shrink-0 border-b border-zinc-800/40">
-        <div ref={tabBarRef} className="flex px-3 pt-2 relative">
+        <div ref={tabBarRef} className="flex px-4 pt-3 gap-1 relative">
           {TABS.map((tab) => (
             <button
               key={tab.id}
               data-tab-button
               onClick={() => setActiveTab(tab.id)}
-              className={`px-3 pb-2.5 pt-1 text-xs font-semibold tracking-wide transition-colors relative ${
+              className={`px-4 pb-3 pt-1.5 text-[11px] font-semibold tracking-widest uppercase transition-colors relative ${
                 activeTab === tab.id
                   ? "text-zinc-100"
                   : "text-zinc-500 hover:text-zinc-300"
@@ -186,16 +292,30 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
         {/* ═══════════════ SESSIONS TAB ═══════════════ */}
         {activeTab === "sessions" && (
           <div className="space-y-2">
-            {sessions.length === 0 ? (
+            {/* Search / Filter bar */}
+            <div className="relative mb-2">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-600" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Filter sessions..."
+                className="w-full bg-zinc-900/60 border border-zinc-800/60 rounded-lg pl-8 pr-3 py-1.5 text-xs text-zinc-300 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500/40 focus:border-indigo-500/30 transition-all duration-150"
+              />
+            </div>
+
+            {filteredSessions.length === 0 ? (
               <div className="text-center py-8">
                 <Box size={32} className="text-zinc-700 mx-auto mb-3" />
-                <p className="text-sm text-zinc-500">No sessions yet</p>
+                <p className="text-sm text-zinc-500">
+                  {searchQuery ? "No matching sessions" : "No sessions yet"}
+                </p>
                 <p className="text-xs text-zinc-600 mt-1">
-                  Start a new scan to create one
+                  {searchQuery ? "Try a different search term" : "Start a new scan to create one"}
                 </p>
               </div>
             ) : (
-              sessions.map((session) => {
+              filteredSessions.map((session) => {
                 const isSelected = currentSession?.id === session.id;
                 return (
                   <div
@@ -250,16 +370,12 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
                         )}
                     </div>
 
-                    {/* Thumbnail placeholder */}
+                    {/* Thumbnail — real image if renders exist */}
                     <div className="w-full h-20 rounded-lg bg-zinc-800/50 border border-zinc-700/30 mb-2 flex items-center justify-center overflow-hidden">
-                      {session.has_renders ? (
-                        <ImageIcon
-                          size={20}
-                          className="text-zinc-600"
-                        />
-                      ) : (
-                        <Box size={20} className="text-zinc-700" />
-                      )}
+                      <SessionThumbnail
+                        sessionId={session.id}
+                        hasRenders={session.has_renders}
+                      />
                     </div>
 
                     {/* File stats */}
@@ -289,9 +405,16 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
             {isRunning && (
               <div className="mb-4 p-3 rounded-lg bg-indigo-500/5 border border-indigo-500/20">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-semibold text-indigo-300">
-                    Running
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-indigo-300">
+                      Running
+                    </span>
+                    {/* Live pulsing indicator */}
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-60" />
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500" />
+                    </span>
+                  </div>
                   <span className="text-xs text-indigo-400 font-mono">
                     {formatDuration(elapsed)}
                   </span>
@@ -308,10 +431,18 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
                     }}
                   />
                 </div>
-                <p className="text-[10px] text-zinc-500 mt-1.5">
-                  {stages.filter((s) => s.status === "complete").length} of{" "}
-                  {PIPELINE_STAGES.length} stages complete
-                </p>
+                <div className="flex items-center justify-between mt-1.5">
+                  <p className="text-[10px] text-zinc-500">
+                    {stages.filter((s) => s.status === "complete").length} of{" "}
+                    {PIPELINE_STAGES.length} stages complete
+                  </p>
+                  {estimatedRemaining != null && (
+                    <p className="text-[10px] text-zinc-500 flex items-center gap-1">
+                      <Clock size={10} />
+                      ~{formatDuration(estimatedRemaining)} remaining
+                    </p>
+                  )}
+                </div>
               </div>
             )}
 
@@ -327,7 +458,6 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
                   const isSkipped = stage.status === "skipped";
                   const isExpanded = expandedStage === stage.id;
 
-                  // Per-stage progress estimate (mock for running stage)
                   const stageProgress = isDone
                     ? 100
                     : isCurrent
@@ -391,6 +521,11 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
                                   {stageProgress}%
                                 </span>
                               )}
+                              {!isDone && !isCurrent && !isError && (
+                                <span className="text-[10px] text-zinc-700 font-mono">
+                                  ~{formatDuration(STAGE_DURATION_ESTIMATES[stage.id] ?? 60)}
+                                </span>
+                              )}
                               <ChevronRight
                                 size={12}
                                 className={`text-zinc-600 transition-transform duration-200 ${
@@ -450,6 +585,12 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
                             <span>Stage</span>
                             <span className="text-zinc-200">
                               {stage.id} / {PIPELINE_STAGES.length}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Est. Duration</span>
+                            <span className="text-zinc-200">
+                              ~{formatDuration(STAGE_DURATION_ESTIMATES[stage.id] ?? 60)}
                             </span>
                           </div>
                         </div>
@@ -607,14 +748,28 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
                     onClick={() =>
                       openFolder(`data/output/${currentSession.id}`)
                     }
-                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs text-zinc-400 bg-zinc-900/40 border border-zinc-800/40 hover:border-zinc-600 hover:text-zinc-200 transition-colors"
+                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs text-zinc-400 bg-zinc-900/40 border border-zinc-800/40 hover:border-zinc-600 hover:text-zinc-200 transition-all duration-150 active:scale-[0.98]"
                   >
                     <Folder size={12} /> Open Folder
                   </button>
-                  <button className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs text-zinc-400 bg-zinc-900/40 border border-zinc-800/40 hover:border-zinc-600 hover:text-zinc-200 transition-colors">
+                  <button className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs text-zinc-400 bg-zinc-900/40 border border-zinc-800/40 hover:border-zinc-600 hover:text-zinc-200 transition-all duration-150 active:scale-[0.98]">
                     <Download size={12} /> Export
                   </button>
                 </div>
+
+                {/* Re-run Pipeline button */}
+                <button
+                  onClick={handleRerunPipeline}
+                  disabled={isRunning}
+                  className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium transition-all duration-200 active:scale-[0.98] ${
+                    isRunning
+                      ? "bg-zinc-800 text-zinc-500 border border-zinc-700/50 cursor-not-allowed"
+                      : "bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 hover:border-indigo-500/30"
+                  }`}
+                >
+                  <RefreshCw size={13} className={isRunning ? "" : ""} />
+                  Re-run Pipeline
+                </button>
               </>
             )}
           </div>

@@ -418,6 +418,23 @@ input[type="range"]::-moz-range-thumb {
   background: #a1a1aa;
 }
 
+/* ── View Crossfade Transition ────────────────────────────────── */
+
+.view-enter {
+  opacity: 0;
+}
+.view-enter-active {
+  opacity: 1;
+  transition: opacity 150ms ease-out;
+}
+.view-exit {
+  opacity: 1;
+}
+.view-exit-active {
+  opacity: 0;
+  transition: opacity 150ms ease-out;
+}
+
 /* ── Crosshair Cursor for Charts ──────────────────────────────── */
 
 .chart-crosshair .recharts-wrapper {
