@@ -18,11 +18,13 @@ import {
   Maximize2,
   Play,
   Pause,
-  GripVertical,
 } from 'lucide-react';
 import useSessionStore from './store/sessionStore';
 import usePipelineStore from './store/pipelineStore';
-import { onPipelineLog, onPipelineComplete, openFolder } from './lib/tauri';
+import useToastStore from './store/toastStore';
+import { openFolder } from './lib/tauri';
+import { bindToast } from './lib/api';
+import { usePipelineEvents } from './hooks/usePipelineEvents';
 import ToastContainer from './components/Toast';
 import { DetailPanel } from './components/DetailPanel';
 import NewScanWizard from './components/NewScanWizard';
@@ -46,8 +48,17 @@ export default function App() {
     fetchGpuInfo,
     stopPipeline,
   } = usePipelineStore();
+  const addToast = useToastStore((s) => s.addToast);
 
   const isRunning = status === 'running' || status === 'stopping';
+
+  // ── Wire toast store into the IPC layer ───────────────────────
+  useEffect(() => {
+    bindToast(addToast);
+  }, [addToast]);
+
+  // ── Pipeline event listeners (typed, auto-cleanup) ────────────
+  usePipelineEvents();
 
   // ── Bootstrap on mount ──────────────────────────────────────
   useEffect(() => {
@@ -58,31 +69,6 @@ export default function App() {
     };
     init();
   }, [fetchSessions, fetchGpuInfo]);
-
-  // ── Tauri event listeners ───────────────────────────────────
-  useEffect(() => {
-    const unlisteners: Array<Promise<() => void>> = [];
-
-    const logUnsub = onPipelineLog((payload) => {
-      usePipelineStore.getState().parseLogLine(payload.line, payload.level);
-    });
-    if (logUnsub) unlisteners.push(logUnsub);
-
-    const completeUnsub = onPipelineComplete((exitCode) => {
-      usePipelineStore.getState().onPipelineComplete(exitCode);
-      useSessionStore.getState().fetchSessions();
-      if (document.title) {
-        const original = document.title;
-        document.title = 'Pipeline Complete!';
-        setTimeout(() => { document.title = original; }, 3000);
-      }
-    });
-    if (completeUnsub) unlisteners.push(completeUnsub);
-
-    return () => {
-      unlisteners.forEach((p) => p.then((unsub) => unsub()));
-    };
-  }, []);
 
   // ── Poll GPU info while pipeline is running ─────────────────
   useEffect(() => {
@@ -210,7 +196,7 @@ export default function App() {
             </button>
           </div>
 
-          {/* Resize handle — draggable right edge */}
+          {/* Resize handle -- draggable right edge */}
           {isPanelOpen && (
             <div
               onMouseDown={handleResizeStart}
@@ -231,7 +217,7 @@ export default function App() {
             {isPanelOpen ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
           </button>
 
-          {/* Main Content — switches on active view with crossfade */}
+          {/* Main Content -- switches on active view with crossfade */}
           <div className="flex-1 relative overflow-hidden">
             <div
               className={`absolute inset-0 transition-opacity duration-150 ease-out ${
