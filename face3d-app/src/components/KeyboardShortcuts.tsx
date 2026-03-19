@@ -21,6 +21,7 @@ const SHORTCUTS: Shortcut[] = [
   { keys: 'Ctrl+3', label: '3D Workspace', category: 'Navigation' },
   { keys: 'Ctrl+4', label: 'Performance Metrics', category: 'Navigation' },
   { keys: 'Ctrl+5', label: 'Compare Sessions', category: 'Navigation' },
+  { keys: 'Ctrl+6', label: 'Sensor Data', category: 'Navigation' },
   { keys: 'Ctrl+`', label: 'Toggle Console', category: 'Panels' },
   { keys: 'Ctrl+N', label: 'New Scan Wizard', category: 'Actions' },
   { keys: 'Space', label: 'Start / Stop Pipeline', category: 'Actions' },
@@ -56,6 +57,7 @@ export default function KeyboardShortcuts({
           '3': 'view',
           '4': 'metrics',
           '5': 'compare',
+          '6': 'sensors',
         };
         if (viewMap[e.key]) {
           e.preventDefault();

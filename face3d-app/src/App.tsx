@@ -200,16 +200,16 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => usePipelineStore.getState().clearLogs()}
-                  className="text-[10px] text-zinc-500 hover:text-zinc-300 px-2 py-1 bg-white/5 rounded-md transition-colors"
+                  className="text-[10px] text-zinc-500 hover:text-zinc-300 px-2 py-1 bg-white/5 hover:bg-white/[0.08] rounded-md transition-all duration-150 active:scale-95"
                 >
                   Clear
                 </button>
-                <button className="text-zinc-500 hover:text-zinc-300 p-1">
+                <button className="text-zinc-500 hover:text-zinc-300 p-1 hover:bg-white/5 rounded-md transition-all duration-150 active:scale-90">
                   <Maximize2 size={14} />
                 </button>
                 <button
                   onClick={() => setIsConsoleOpen(false)}
-                  className="text-zinc-500 hover:text-white p-1 bg-white/5 rounded-md"
+                  className="text-zinc-500 hover:text-white p-1 bg-white/5 hover:bg-white/[0.08] rounded-md transition-all duration-150 active:scale-90"
                 >
                   <ChevronRight size={14} className="rotate-90" />
                 </button>
@@ -222,22 +222,41 @@ export default function App() {
               {logs.length === 0 ? (
                 <div className="text-zinc-600 italic">No logs yet. Start the pipeline to see output.</div>
               ) : (
-                logs.map((log, i) => (
-                  <div
-                    key={i}
-                    className={
-                      log.level === 'error'
-                        ? 'text-red-400'
-                        : log.level === 'warn'
-                        ? 'text-amber-400'
-                        : log.level === 'stderr'
-                        ? 'text-orange-300/70'
-                        : 'text-zinc-400'
-                    }
-                  >
-                    <span className="text-zinc-600">[{log.timestamp}]</span> {log.message}
-                  </div>
-                ))
+                logs.map((log, i) => {
+                  const isStageTransition = log.message.match(/(?:===\s*Stage|Running\s+stage|Stage\s+\d+\s+completed)/i);
+                  const isStageNameLine = log.message.match(/^Stage\s+\d+[:\s]/i);
+                  const isError = log.level === 'error';
+
+                  if (isStageTransition) {
+                    return (
+                      <div key={i} className="my-1.5">
+                        <div className="h-px bg-gradient-to-r from-transparent via-emerald-500/20 to-transparent" />
+                        <div className="text-emerald-400 font-bold text-[10px] tracking-wider uppercase py-0.5">
+                          {log.message}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div
+                      key={i}
+                      className={`${
+                        isError
+                          ? 'text-red-400 border-l-2 border-red-500/30 pl-2'
+                          : log.level === 'warn'
+                          ? 'text-amber-400'
+                          : log.level === 'stderr'
+                          ? 'text-orange-300/70'
+                          : isStageNameLine
+                          ? 'text-emerald-300 font-bold'
+                          : 'text-zinc-400'
+                      }`}
+                    >
+                      <span className="text-zinc-700 opacity-60">[{log.timestamp}]</span> {log.message}
+                    </div>
+                  );
+                })
               )}
             </div>
           </div>
