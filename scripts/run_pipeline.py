@@ -1734,27 +1734,108 @@ def stage_9_landmarks(config: dict, session: dict) -> bool:
 
 
 def stage_10_flame(config: dict, session: dict) -> bool:
-    """Fit FLAME parametric face model."""
+    """Fit FLAME parametric face model.
+
+    Checks for matching landmarks + camera params before attempting the fit.
+    Falls back gracefully with clear diagnostics when data is insufficient.
+    """
     marker = session["proc_dir"] / ".stage_10_complete"
     if stage_complete(marker):
         log.info("Stage 10: FLAME fitting already complete, skipping")
         return True
 
     log.info("Stage 10: Fitting FLAME face model...")
+    import json as _json
     from reconstruction import fit_flame_to_sequence
 
     flame_cfg = config["reconstruction"]["flame"]
+    landmarks_dir = session["proc_dir"] / "landmarks"
+    colmap_model_dir = session["proc_dir"] / "colmap" / "sparse" / "0"
+
+    # ── Pre-flight: count available data ──────────────────────────────
+    landmark_files = sorted(landmarks_dir.glob("*.json")) if landmarks_dir.exists() else []
+    num_landmarks_total = len(landmark_files)
+    num_detected = 0
+    for lf in landmark_files:
+        try:
+            with open(lf, "r", encoding="utf-8") as fh:
+                ld = _json.load(fh)
+            if ld.get("detected", False):
+                num_detected += 1
+        except Exception:
+            pass
+
+    cameras_bin = colmap_model_dir / "cameras.bin"
+    images_bin = colmap_model_dir / "images.bin"
+    has_colmap = cameras_bin.exists() and images_bin.exists()
+
+    # Count COLMAP images
+    num_colmap_images = 0
+    if has_colmap:
+        try:
+            import struct
+            with open(images_bin, "rb") as fh:
+                num_colmap_images = struct.unpack("<Q", fh.read(8))[0]
+        except Exception:
+            pass
+
+    log.info(
+        "Stage 10 pre-flight: %d landmark files (%d with detections), "
+        "COLMAP model %s (%d images)",
+        num_landmarks_total, num_detected,
+        "found" if has_colmap else "MISSING", num_colmap_images,
+    )
+
+    if num_detected < 3:
+        log.warning(
+            "FLAME fitting skipped: only %d frames with face detections "
+            "(minimum 3 required). Run landmark detection (stage 9) on more frames.",
+            num_detected,
+        )
+        mark_stage_complete(marker)
+        return True
+
+    if not has_colmap:
+        log.warning(
+            "FLAME fitting skipped: no COLMAP model found at %s. "
+            "Camera poses are required for multi-view FLAME fitting.",
+            colmap_model_dir,
+        )
+        mark_stage_complete(marker)
+        return True
+
+    if num_colmap_images < 3:
+        log.warning(
+            "FLAME fitting may struggle: only %d images in COLMAP model "
+            "(ideally need 5+). Will attempt anyway.",
+            num_colmap_images,
+        )
+
+    # ── Run FLAME fitting ──────────────────────────────────────────────
     try:
-        fit_flame_to_sequence(
+        result = fit_flame_to_sequence(
             frames_dir=session["proc_dir"] / "frames_srgb",
-            landmarks_dir=session["proc_dir"] / "landmarks",
-            colmap_model_dir=session["proc_dir"] / "colmap" / "sparse" / "0",
+            landmarks_dir=landmarks_dir,
+            colmap_model_dir=colmap_model_dir,
             flame_model_path=flame_cfg["model_path"],
             embedding_path=flame_cfg["embedding_path"],
             output_dir=session["proc_dir"] / "flame",
         )
+        converged = result.get("converged", False)
+        final_loss = result.get("loss", float("inf"))
+        log.info(
+            "FLAME fitting complete: loss=%.4f, converged=%s",
+            final_loss, converged,
+        )
+    except RuntimeError as e:
+        log.warning(
+            "FLAME fitting failed: %s. "
+            "This is non-fatal -- the pipeline will continue without a fitted "
+            "FLAME model. Gaussian initialization will fall back to point cloud.",
+            e,
+        )
     except Exception as e:
-        log.warning("FLAME fitting failed (non-fatal for non-face data): %s", e)
+        log.warning("FLAME fitting failed with unexpected error: %s", e)
         log.info("Continuing without FLAME model")
 
     mark_stage_complete(marker)
