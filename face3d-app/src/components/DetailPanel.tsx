@@ -36,6 +36,24 @@ function isTauri(): boolean {
   return typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
 }
 
+function formatRelativeTime(dateStr: string): string {
+  try {
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return "just now";
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h ago`;
+    const diffDay = Math.floor(diffHr / 24);
+    if (diffDay < 7) return `${diffDay}d ago`;
+    return date.toLocaleDateString();
+  } catch {
+    return "";
+  }
+}
+
 // ── Session Thumbnail ─────────────────────────────────────────
 
 const SessionThumbnail: React.FC<{ sessionId: string; hasRenders: boolean }> = ({
@@ -273,13 +291,25 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
                       )}
                   </div>
 
-                  {/* File size */}
-                  {sessionSize != null && (
-                    <div className="flex items-center gap-1 text-xs text-zinc-500">
-                      <HardDrive size={10} />
-                      {formatBytes(sessionSize)}
-                    </div>
-                  )}
+                  {/* Size + date row */}
+                  <div className="flex items-center justify-between text-xs text-zinc-600">
+                    {sessionSize != null ? (
+                      <span className="flex items-center gap-1">
+                        <HardDrive size={10} />
+                        {formatBytes(sessionSize)}
+                      </span>
+                    ) : session.total_size_bytes && session.total_size_bytes > 0 ? (
+                      <span className="flex items-center gap-1">
+                        <HardDrive size={10} />
+                        {formatBytes(session.total_size_bytes)}
+                      </span>
+                    ) : <span />}
+                    {session.created_at && (
+                      <span title={session.created_at}>
+                        {formatRelativeTime(session.created_at)}
+                      </span>
+                    )}
+                  </div>
 
                   {/* Pipeline progress bar (inline on active session) */}
                   {showPipeline && pipelineProgress && (

@@ -140,9 +140,30 @@ const STAGE_COLORS: Record<string, string> = {
 };
 
 const StageTimingChart: React.FC = () => {
-  const { stages } = usePipelineStore();
+  const { stages, status } = usePipelineStore();
+  const { currentSession } = useSessionStore();
+  const [dbStages, setDbStages] = useState<any[]>([]);
 
-  const stageData = stages
+  // Load historical stage data from DB when not running
+  useEffect(() => {
+    if (status === 'running' || !currentSession?.id) return;
+    import('../lib/dbBridge').then(({ getSessionSummaryFromDb }) => {
+      getSessionSummaryFromDb(currentSession.id).then((summary) => {
+        if (summary?.stages && summary.stages.length > 0) {
+          setDbStages(summary.stages.map((s: any) => ({
+            name: (s.stage_name || `Stage ${s.stage_num}`).slice(0, 14),
+            fullName: s.stage_name || `Stage ${s.stage_num}`,
+            elapsed: s.duration_s ?? 0,
+            status: s.status,
+            id: s.stage_num,
+          })));
+        }
+      }).catch(() => {});
+    }).catch(() => {});
+  }, [currentSession?.id, status]);
+
+  // Use live data when running, DB data for history
+  const liveStageData = stages
     .filter((s) => s.status !== 'pending')
     .map((s) => ({
       name: s.name.length > 14 ? s.name.slice(0, 12) + '..' : s.name,
@@ -151,6 +172,8 @@ const StageTimingChart: React.FC = () => {
       status: s.status,
       id: s.id,
     }));
+
+  const stageData = liveStageData.length > 0 ? liveStageData : dbStages;
 
   if (stageData.length === 0) {
     return (
@@ -451,8 +474,30 @@ function formatBytesLong(bytes: number): string {
 export const TrainingMetrics: React.FC = () => {
   const [timeRange, setTimeRange] = useState('all');
   const [activeSection, setActiveSection] = useState<'training' | 'pipeline' | 'data'>('training');
-  const { metrics, gpuInfo, status } = usePipelineStore();
+  const { metrics: liveMetrics, gpuInfo, status } = usePipelineStore();
+  const { currentSession } = useSessionStore();
+  const [dbMetrics, setDbMetrics] = useState<any[]>([]);
   const isTraining = status === 'running';
+
+  // Load historical metrics from DB when not actively training
+  useEffect(() => {
+    if (isTraining || !currentSession?.id) return;
+    import('../lib/dbBridge').then(({ getTrainingMetricsFromDb }) => {
+      getTrainingMetricsFromDb(currentSession.id).then((data) => {
+        if (data && data.length > 0) {
+          setDbMetrics(data.map((d: any) => ({
+            iter: d.iteration,
+            loss: d.loss,
+            psnr: d.psnr,
+            gaussians: d.num_gaussians,
+          })));
+        }
+      }).catch(() => {});
+    }).catch(() => {});
+  }, [currentSession?.id, isTraining]);
+
+  // Use live metrics when training, DB metrics when viewing history
+  const metrics = isTraining ? liveMetrics : (liveMetrics.length > 0 ? liveMetrics : dbMetrics);
 
   // Filter data by time range
   const getData = () => {
