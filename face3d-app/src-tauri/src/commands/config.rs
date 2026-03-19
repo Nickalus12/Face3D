@@ -192,6 +192,7 @@ pub async fn scan_content_dir(path: String) -> AppResult<serde_json::Value> {
     let mut photos_dng = 0u32;
     let mut sensor_logs = 0u32;
     let mut total_bytes = 0u64;
+    let mut largest_video_bytes = 0u64;
 
     let entries = fs::read_dir(dir)
         .map_err(|e| AppError::System(format!("Failed to read directory: {}", e)))?;
@@ -211,7 +212,12 @@ pub async fn scan_content_dir(path: String) -> AppResult<serde_json::Value> {
             .to_lowercase();
 
         match ext.as_str() {
-            "mp4" | "mov" | "avi" | "mkv" => videos += 1,
+            "mp4" | "mov" | "avi" | "mkv" => {
+                videos += 1;
+                if size > largest_video_bytes {
+                    largest_video_bytes = size;
+                }
+            }
             "jpg" | "jpeg" | "png" | "tif" | "tiff" => photos_jpg += 1,
             "dng" | "arw" | "cr2" | "nef" => photos_dng += 1,
             "zip" => sensor_logs += 1,
@@ -229,6 +235,7 @@ pub async fn scan_content_dir(path: String) -> AppResult<serde_json::Value> {
         "videos": videos,
         "photos_jpg": photos_jpg,
         "photos_dng": photos_dng,
+        "largest_video_mb": largest_video_bytes / 1_048_576,
         "photos": photos_jpg + photos_dng,
         "sensor_logs": sensor_logs,
         "total_bytes": total_bytes,
