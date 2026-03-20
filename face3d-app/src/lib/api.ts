@@ -113,6 +113,31 @@ interface Commands {
   get_python_info:     { args: Record<string, never>; response: PythonInfo };
   get_system_info:     { args: Record<string, never>; response: SystemInfo };
   get_session_metrics: { args: { sessionId: string }; response: string };
+  analyze_photo:       { args: { path: string }; response: PhotoAnalysisResult };
+}
+
+export interface PhotoAnalysisResult {
+  detected: boolean;
+  detection_score: number;
+  bbox: number[];
+  embedding: number[];
+  age: number;
+  gender: string;
+  identity_match: string | null;
+  identity_confidence: number;
+  landmarks_2d_106: number[][];
+  landmarks_3d_68: number[][];
+  head_pose: { yaw: number; pitch: number; roll: number };
+  face_area_ratio: number;
+  sharpness: number;
+  brightness: number;
+  contrast: number;
+  noise_level: number;
+  color_temperature: string;
+  estimated_angle: string;
+  quality_score: number;
+  recommendations: string[];
+  analysis_time_ms: number;
 }
 
 // ── Tauri runtime detection ─────────────────────────────────────
@@ -369,6 +394,29 @@ function getDevFallback<K extends keyof Commands>(
     get_python_info: MOCK_PYTHON,
     get_system_info: MOCK_SYSTEM,
     get_session_metrics: '{"psnr": 28.5, "ssim": 0.92, "lpips": 0.08}',
+    analyze_photo: {
+      detected: true,
+      detection_score: 0.88,
+      bbox: [120, 80, 420, 460],
+      embedding: Array(512).fill(0),
+      age: 23,
+      gender: "F",
+      identity_match: "Demo Person",
+      identity_confidence: 0.92,
+      landmarks_2d_106: Array(106).fill([0, 0]),
+      landmarks_3d_68: Array(68).fill([0, 0, 0]),
+      head_pose: { yaw: -5.2, pitch: 3.1, roll: 1.0 },
+      face_area_ratio: 0.18,
+      sharpness: 142.3,
+      brightness: 134.0,
+      contrast: 45.2,
+      noise_level: 12.5,
+      color_temperature: "warm",
+      estimated_angle: "front-facing",
+      quality_score: 82,
+      recommendations: ["Good quality for reconstruction"],
+      analysis_time_ms: 1250,
+    } as PhotoAnalysisResult,
   };
 
   if (command in mocks) {
@@ -603,6 +651,16 @@ export async function getSessionMetrics(
     return await call("get_session_metrics", { sessionId });
   } catch {
     return "";
+  }
+}
+
+export async function analyzePhoto(
+  path: string,
+): Promise<PhotoAnalysisResult | null> {
+  try {
+    return await call("analyze_photo", { path });
+  } catch {
+    return null;
   }
 }
 

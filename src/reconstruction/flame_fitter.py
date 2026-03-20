@@ -294,13 +294,58 @@ class FLAMEFitter:
             cam_R.append(torch.tensor(cam["R"], dtype=torch.float32, device=device).reshape(3, 3))
             cam_t.append(torch.tensor(cam["t"], dtype=torch.float32, device=device).reshape(3, 1))
 
+        # ── Estimate initial FLAME translation from landmarks + cameras ──
+        # The FLAME model is centered at origin with vertices in ~[-0.2, 0.15].
+        # We need to place it where the cameras are looking at the face.
+        # Strategy: unproject the face center from the first camera to 3D,
+        # estimating depth from the face bounding box size.
+        init_translation = torch.zeros(1, 3, device=device)
+        try:
+            # Use median face center across frames for robustness
+            face_centers_world = []
+            for fi in range(min(num_frames, 10)):
+                lm = targets[fi].cpu().numpy()  # (K, 2) in pixels
+                center_px = lm.mean(axis=0)  # face center in pixels
+                bbox_h = lm[:, 1].max() - lm[:, 1].min()
+                K_np = cam_K[fi].cpu().numpy()
+                R_np = cam_R[fi].cpu().numpy()
+                t_np = cam_t[fi].cpu().numpy()
+                fy = K_np[1, 1]
+                cx, cy = K_np[0, 2], K_np[1, 2]
+                fx = K_np[0, 0]
+                # Average human face height ~0.23m, FLAME model face height ~0.25 units
+                # Estimate depth: face_height_world / face_height_pixels = depth / focal_length
+                # depth = focal_length * face_height_world / face_height_pixels
+                face_height_world = 0.23  # approximate meters (also ~FLAME units)
+                depth = fy * face_height_world / max(bbox_h, 50.0)
+                # Unproject center pixel to camera space
+                p_cam = np.array([
+                    (center_px[0] - cx) / fx * depth,
+                    (center_px[1] - cy) / fy * depth,
+                    depth
+                ]).reshape(3, 1)
+                # Camera to world: p_world = R^T @ (p_cam - t)
+                p_world = R_np.T @ (p_cam - t_np)
+                face_centers_world.append(p_world.flatten())
+            face_centers_world = np.array(face_centers_world)
+            median_center = np.median(face_centers_world, axis=0)
+            init_translation = torch.tensor(
+                median_center.reshape(1, 3), dtype=torch.float32, device=device
+            )
+            logger.info(
+                "Initial FLAME translation from landmark unprojection: [%.4f, %.4f, %.4f]",
+                median_center[0], median_center[1], median_center[2],
+            )
+        except Exception as e:
+            logger.warning("Failed to estimate initial translation: %s, using zeros", e)
+
         # ── Optimizable parameters ─────────────────────────────────────
         shape_params = torch.zeros(1, num_shape_coeffs, device=device, requires_grad=True)
         expr_params = torch.zeros(1, num_expr_coeffs, device=device, requires_grad=True)
         jaw_pose = torch.zeros(1, 3, device=device, requires_grad=True)
         neck_pose = torch.zeros(1, 3, device=device, requires_grad=True)
         global_rot = torch.zeros(1, 3, device=device, requires_grad=True)
-        translation = torch.zeros(1, 3, device=device, requires_grad=True)
+        translation = init_translation.detach().clone().to(dtype=torch.float32, device=device).requires_grad_(True)
 
         all_params = [shape_params, expr_params, jaw_pose, neck_pose, global_rot, translation]
 
@@ -431,6 +476,8 @@ class FLAMEFitter:
 
                 total_loss = proj_loss + reg_loss + temporal_loss
                 total_loss.backward()
+                # Clip gradients to prevent NaN from large projection errors
+                torch.nn.utils.clip_grad_norm_(stage_params, max_norm=10.0)
                 optimizer.step()
                 scheduler.step()
 

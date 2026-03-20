@@ -11,6 +11,7 @@ const Gallery = lazy(() => import('./components/Gallery').then(m => ({ default: 
 const SettingsPanel = lazy(() => import('./components/SettingsPanel'));
 const TrainingMetrics = lazy(() => import('./components/TrainingMetrics').then(m => ({ default: m.TrainingMetrics })));
 const PipelineView = lazy(() => import('./components/PipelineView'));
+const PhotoAnalyzer = lazy(() => import('./components/PhotoAnalyzer'));
 import {
   ChevronRight,
   ChevronLeft,
@@ -259,6 +260,8 @@ export default function App() {
                     <SettingsPanel />
                   ) : activeView === 'metrics' ? (
                     <TrainingMetrics />
+                  ) : activeView === 'analyze' ? (
+                    <PhotoAnalyzer />
                   ) : (
                     <Viewer3D />
                   )}

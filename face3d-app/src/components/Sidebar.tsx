@@ -1,8 +1,8 @@
 import { useState, useCallback } from 'react';
-import { Home, Workflow, Cuboid, Images, ChartLine, Settings } from 'lucide-react';
+import { Home, Workflow, Cuboid, Images, ChartLine, ScanSearch, Settings } from 'lucide-react';
 import usePipelineStore from '../store/pipelineStore';
 
-export type ViewId = 'home' | 'pipeline' | 'view' | 'metrics' | 'gallery' | 'settings';
+export type ViewId = 'home' | 'pipeline' | 'view' | 'gallery' | 'metrics' | 'analyze' | 'settings';
 
 const NAV_ITEMS: { id: ViewId; icon: typeof Home; label: string; shortcut: string }[] = [
   { id: 'home', icon: Home, label: 'Dashboard', shortcut: 'Ctrl+1' },
@@ -10,6 +10,7 @@ const NAV_ITEMS: { id: ViewId; icon: typeof Home; label: string; shortcut: strin
   { id: 'view', icon: Cuboid, label: '3D View', shortcut: 'Ctrl+3' },
   { id: 'gallery', icon: Images, label: 'Gallery', shortcut: 'Ctrl+4' },
   { id: 'metrics', icon: ChartLine, label: 'Metrics', shortcut: 'Ctrl+5' },
+  { id: 'analyze', icon: ScanSearch, label: 'Analyze', shortcut: 'Ctrl+6' },
 ];
 
 interface SidebarProps {

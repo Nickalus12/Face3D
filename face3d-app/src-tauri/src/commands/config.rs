@@ -179,6 +179,40 @@ pub async fn open_folder(path: String) -> AppResult<()> {
     Ok(())
 }
 
+/// Analyze a single photo using the Python analysis module.
+/// Returns JSON with face detection, landmarks, quality metrics, etc.
+#[command]
+pub async fn analyze_photo(path: String) -> AppResult<serde_json::Value> {
+    let photo = Path::new(&path);
+    if !photo.exists() {
+        return Err(AppError::NotFound(format!("Photo not found: {}", path)));
+    }
+
+    let src_dir = Path::new(PROJECT_ROOT).join("src");
+    let output = Command::new(PYTHON_EXE)
+        .env("PYTHONPATH", src_dir.to_str().unwrap_or(""))
+        .args([
+            "-c",
+            &format!(
+                "from analysis.single_photo import analyze_and_print_json; analyze_and_print_json(r'{}')",
+                path.replace('\'', "\\'")
+            ),
+        ])
+        .output()
+        .map_err(|e| AppError::System(format!("Failed to run photo analysis: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::Pipeline(format!("Photo analysis failed: {}", stderr)));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| AppError::Json(e))?;
+
+    Ok(json)
+}
+
 /// Scan a content directory and return file counts by type.
 #[command]
 pub async fn scan_content_dir(path: String) -> AppResult<serde_json::Value> {

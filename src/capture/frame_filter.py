@@ -275,6 +275,8 @@ def filter_frames(
     min_face_area_ratio: float = _MIN_FACE_AREA_RATIO,
     quick_mode: bool = False,
     max_workers: int | None = None,
+    gyro_stability_scores: Optional[np.ndarray] = None,
+    gyro_reject_threshold: float = 0.3,
 ) -> list[Path]:
     """Filter a directory of frames by quality and write selection results.
 
@@ -304,6 +306,13 @@ def filter_frames(
             blur checks for maximum speed.
         max_workers: Number of parallel worker processes for blur and
             exposure checks in quick_mode. Defaults to ``cpu_count - 1``.
+        gyro_stability_scores: Optional (N,) array of per-frame stability
+            scores from gyroscope data, in [0, 1]. When provided, frames
+            with scores below *gyro_reject_threshold* are rejected
+            (camera was rotating too fast = motion blur).
+        gyro_reject_threshold: Minimum gyro stability score. Frames below
+            this are rejected. Default 0.3 rejects only very fast rotation
+            (>2.3 rad/s = ~130 deg/s).
 
     Returns:
         List of paths to frames that passed all quality checks.
@@ -482,6 +491,34 @@ def filter_frames(
         finally:
             if face_detector_ctx is not None:
                 face_detector_ctx.__exit__(None, None, None)
+
+    # --- Gyro stability post-filter ---
+    if gyro_stability_scores is not None and len(gyro_stability_scores) > 0:
+        n_gyro_rejected = 0
+        for i, entry in enumerate(report_frames):
+            if entry is None:
+                continue
+            if i < len(gyro_stability_scores):
+                score = float(gyro_stability_scores[i])
+                entry.setdefault("details", {})["gyro_stability"] = round(score, 4)
+                if score < gyro_reject_threshold:
+                    if entry.get("selected", False):
+                        entry["selected"] = False
+                        entry.setdefault("reasons", []).append(
+                            f"gyro_unstable (stability={score:.3f} < {gyro_reject_threshold})"
+                        )
+                        # Remove from selected list
+                        frame_path = frame_files[i]
+                        if frame_path in selected:
+                            selected.remove(frame_path)
+                        n_gyro_rejected += 1
+        if n_gyro_rejected > 0:
+            logger.info(
+                "Gyro stability filter: rejected %d frames (threshold=%.2f)",
+                n_gyro_rejected, gyro_reject_threshold,
+            )
+        else:
+            logger.info("Gyro stability filter: all frames above threshold %.2f", gyro_reject_threshold)
 
     # Build summary
     reason_counts: dict[str, int] = {}

@@ -370,7 +370,7 @@ def validate_stage_output(stage_num: int, config: dict, session: dict) -> dict:
             try:
                 with open(jf) as f:
                     data = json.load(f)
-                if data and (isinstance(data, list) and len(data) > 0) or (isinstance(data, dict) and data.get("landmarks")):
+                if data and (isinstance(data, list) and len(data) > 0) or (isinstance(data, dict) and (data.get("landmarks") or data.get("detected"))):
                     n_with_face += 1
                 else:
                     n_no_face += 1
@@ -1045,13 +1045,37 @@ def stage_1_extract_frames(config: dict, session: dict) -> bool:
         # Copy processed photos into frames_srgb so they are included
         # in downstream stages (DA3, COLMAP, training). Photos are named
         # photo_NNNN.png to distinguish from video frame_NNNNNN.png files.
+        # Photos are resized to match video frame dimensions so DA3's
+        # single-camera COLMAP model works correctly.
         srgb_dir = session["proc_dir"] / "frames_srgb"
         srgb_dir.mkdir(parents=True, exist_ok=True)
+
+        # Determine target resolution from existing video frames
+        video_frames = sorted(srgb_dir.glob("frame_*.png"))
+        target_size = None
+        if video_frames:
+            from PIL import Image as _PILImage
+            with _PILImage.open(video_frames[0]) as _ref:
+                target_size = (_ref.width, _ref.height)  # (W, H)
+            log.info("Stage 1: Resizing %d photos to match video frames (%dx%d)",
+                     len(all_photo_paths), target_size[0], target_size[1])
+
+        n_copied = 0
         for pp in all_photo_paths:
             dst = srgb_dir / pp.name
             if not dst.exists():
-                shutil.copy2(pp, dst)
+                if target_size is not None:
+                    from PIL import Image as _PILImage
+                    with _PILImage.open(pp) as _img:
+                        if (_img.width, _img.height) != target_size:
+                            _img = _img.resize(target_size, _PILImage.LANCZOS)
+                        _img.save(dst)
+                else:
+                    shutil.copy2(pp, dst)
+                n_copied += 1
                 log.debug("Copied photo %s to frames_srgb/", pp.name)
+        if n_copied > 0:
+            log.info("Stage 1: Added %d photos to frames_srgb/ for DA3 + training", n_copied)
 
         # Save a photo manifest so downstream stages know which images are photos
         # and their source lens for weighted training
@@ -1172,6 +1196,61 @@ def stage_3_filter_frames(config: dict, session: dict) -> bool:
     blur_threshold = filt_cfg.get("blur_threshold", 100.0)
     quick_mode = filt_cfg.get("quick_mode", True)
 
+    # --- Gyro stability scoring (parse sensor ZIP early if needed) ---
+    gyro_scores = None
+    sensor_npz = session["proc_dir"] / "sensors" / "sensor_logger_data.npz"
+    if not sensor_npz.exists():
+        # Try to parse sensor ZIP early just for gyro data
+        sensor_log_path = session.get("sensor_log_path")
+        if sensor_log_path is None:
+            content_dir = PROJECT_ROOT / "content" / "New"
+            if content_dir.exists():
+                zips = sorted(content_dir.glob("*.zip"))
+                if zips:
+                    sensor_log_path = zips[0]
+        if sensor_log_path is not None and Path(sensor_log_path).exists():
+            try:
+                from sensors.sensor_logger import parse_sensor_logger_zip
+                sensors_dir = session["proc_dir"] / "sensors"
+                sensors_dir.mkdir(parents=True, exist_ok=True)
+                parse_sensor_logger_zip(
+                    zip_path=sensor_log_path,
+                    output_dir=sensors_dir,
+                )
+                log.info("Stage 3: Parsed sensor data early for gyro stability scoring")
+            except Exception as e:
+                log.debug("Stage 3: Could not parse sensor ZIP for gyro: %s", e)
+
+    if sensor_npz.exists():
+        try:
+            import numpy as np
+            from sensors.gyro_frame_scorer import score_extracted_frames
+
+            frames_dir = session["proc_dir"] / "frames_srgb"
+            n_frames = len(list(frames_dir.glob("frame_*.png")))
+            if n_frames > 0 and session.get("video_paths"):
+                video_path = session["video_paths"][0]
+                from capture.frame_extractor import _probe_video, _get_fps, _get_duration
+                probe = _probe_video(video_path)
+                fps = _get_fps(probe)
+                duration = _get_duration(probe)
+
+                gyro_scores = score_extracted_frames(
+                    sensor_npz_path=sensor_npz,
+                    num_extracted_frames=n_frames,
+                    video_duration=duration,
+                    video_fps=fps,
+                )
+                n_unstable = int((gyro_scores < 0.3).sum())
+                log.info(
+                    "Stage 3: Gyro stability scores — %d frames, "
+                    "mean=%.3f, min=%.3f, %d below reject threshold",
+                    n_frames, float(gyro_scores.mean()), float(gyro_scores.min()), n_unstable,
+                )
+        except Exception as e:
+            log.debug("Stage 3: Gyro scoring failed (non-fatal): %s", e)
+            gyro_scores = None
+
     filter_frames(
         frames_dir=session["proc_dir"] / "frames_srgb",
         output_json=session["proc_dir"] / "selected_frames.json",
@@ -1180,6 +1259,7 @@ def stage_3_filter_frames(config: dict, session: dict) -> bool:
         exposure_high=filt_cfg.get("exposure_high", 225),
         require_face=filt_cfg.get("require_face", True),
         quick_mode=quick_mode,
+        gyro_stability_scores=gyro_scores,
     )
 
     mark_stage_complete(marker)
@@ -1297,6 +1377,35 @@ def stage_4_parse_sensors(config: dict, session: dict) -> bool:
                         lux_max=np.array(lighting["lux_range"][1]),
                     )
                     log.info("Stage 4: Saved lighting profile to %s", lighting_npz_path)
+
+                # Compute and save per-frame gyro stability scores for Stage 13
+                if "frame_gyro" in sensor_data:
+                    from sensors.gyro_frame_scorer import compute_frame_stability_scores
+
+                    # Use the raw high-rate gyro for more accurate scoring
+                    raw_data = np.load(str(npz_path), allow_pickle=True)
+                    if "gyro_timestamps" in raw_data and "gyro_xyz" in raw_data:
+                        # Score ALL video frames (not just extracted ones)
+                        all_frame_stability = compute_frame_stability_scores(
+                            gyro_timestamps=raw_data["gyro_timestamps"],
+                            gyro_xyz=raw_data["gyro_xyz"],
+                            frame_timestamps=sensor_data["frame_timestamps"],
+                        )
+                        stability_npz_path = sensors_dir / "gyro_stability.npz"
+                        np.savez_compressed(
+                            str(stability_npz_path),
+                            frame_stability=all_frame_stability,
+                            frame_timestamps=sensor_data["frame_timestamps"],
+                        )
+                        log.info(
+                            "Stage 4: Gyro stability — mean=%.3f, min=%.3f, "
+                            "%d/%d frames below 0.5 -> %s",
+                            float(all_frame_stability.mean()),
+                            float(all_frame_stability.min()),
+                            int((all_frame_stability < 0.5).sum()),
+                            len(all_frame_stability),
+                            stability_npz_path,
+                        )
 
             # Mark that we have Sensor Logger data (skip Madgwick in stage 5)
             (session["proc_dir"] / ".sensor_logger_available").write_text(
@@ -2216,6 +2325,39 @@ def stage_13_train_gaussians(config: dict, session: dict) -> bool:
             "will be down-weighted to 0.3x",
             median_lux, n_outliers,
         )
+
+    # Load per-frame gyro stability weights (if available)
+    # Stable frames get weight 1.0, unstable frames get reduced weight (0.5-1.0)
+    stability_npz_path = session["proc_dir"] / "sensors" / "gyro_stability.npz"
+    if stability_npz_path.exists():
+        import numpy as np
+        stab_data = np.load(str(stability_npz_path))
+        frame_stability = stab_data["frame_stability"]
+
+        # Map stability [0,1] to training weight [0.5, 1.0]
+        # stability=1.0 -> weight=1.0 (still camera)
+        # stability=0.5 -> weight=0.75
+        # stability=0.0 -> weight=0.5
+        gyro_weights = 0.5 + 0.5 * frame_stability
+
+        # Combine with lighting weights if both exist
+        if lighting_weights is not None:
+            # Both are per-video-frame arrays — multiply them
+            min_len = min(len(lighting_weights), len(gyro_weights))
+            combined = lighting_weights[:min_len].astype(np.float32) * gyro_weights[:min_len].astype(np.float32)
+            lighting_weights = combined
+            log.info(
+                "Stage 13: Combined lighting + gyro stability weights for %d frames",
+                min_len,
+            )
+        else:
+            lighting_weights = gyro_weights.astype(np.float32)
+            log.info(
+                "Stage 13: Gyro stability weights — mean=%.3f, min=%.3f, "
+                "%d frames down-weighted",
+                float(gyro_weights.mean()), float(gyro_weights.min()),
+                int((gyro_weights < 0.9).sum()),
+            )
 
     # Load initialized Gaussians
     init_path = session["proc_dir"] / "gaussians_init.pt"
