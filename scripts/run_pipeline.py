@@ -1829,23 +1829,50 @@ def _select_training_frames(config: dict, session: dict) -> None:
 
 
 def stage_9_landmarks(config: dict, session: dict) -> bool:
-    """Detect facial landmarks on all frames."""
+    """Detect facial landmarks on all frames using InsightFace (with MediaPipe fallback)."""
     marker = session["proc_dir"] / ".stage_9_complete"
     if stage_complete(marker):
         log.info("Stage 9: Landmark detection already complete, skipping")
         return True
 
     log.info("Stage 9: Detecting facial landmarks...")
-    from reconstruction import FaceLandmarkDetector
 
-    detector = FaceLandmarkDetector()
-    detector.detect_batch(
-        frames_dir=session["proc_dir"] / "frames_srgb",
-        output_dir=session["proc_dir"] / "landmarks",
-    )
+    # Collect all frame + photo paths
+    frames_dir = session["proc_dir"] / "frames_srgb"
+    if not frames_dir.exists() or not list(frames_dir.glob("*.png")):
+        frames_dir = session["proc_dir"] / "frames"
+    image_paths = sorted(frames_dir.glob("*.png")) + sorted(frames_dir.glob("*.jpg"))
 
-    # Save landmark overlay previews
-    _save_landmark_previews(session)
+    landmarks_dir = session["proc_dir"] / "landmarks"
+    preview_dir = session["out_dir"] / "previews"
+
+    # Try InsightFace first (better accuracy, especially on side profiles)
+    try:
+        from reconstruction.insightface_detector import detect_batch, generate_previews
+
+        log.info("Stage 9: Using InsightFace (buffalo_l, 106+68 landmarks)")
+        summary = detect_batch(
+            image_paths=image_paths,
+            output_dir=landmarks_dir,
+            max_image_size=1920,
+        )
+        log.info(
+            "Stage 9: InsightFace detected %d/%d faces (mean score %.3f)",
+            summary["detected"], summary["total"], summary["mean_score"],
+        )
+
+        # Generate more preview images (every 8th frame)
+        generate_previews(image_paths, landmarks_dir, preview_dir, num_previews=10)
+
+    except ImportError:
+        log.warning("Stage 9: InsightFace not available, falling back to MediaPipe")
+        from reconstruction import FaceLandmarkDetector
+        detector = FaceLandmarkDetector()
+        detector.detect_batch(
+            frames_dir=frames_dir,
+            output_dir=landmarks_dir,
+        )
+        _save_landmark_previews(session)
 
     mark_stage_complete(marker)
     return True
