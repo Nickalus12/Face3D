@@ -2318,13 +2318,29 @@ def stage_13_train_gaussians(config: dict, session: dict) -> bool:
         # Build per-frame loss weights: outlier frames get reduced weight (0.3x),
         # normal frames get 1.0.  This prevents inconsistent lighting from
         # corrupting the appearance model.
-        lighting_weights = np.where(outlier_mask, 0.3, 1.0).astype(np.float32)
+        #
+        # IMPORTANT: Only apply if there's actual lighting variation.
+        # If >80% of frames are "outliers", the lighting was consistent
+        # (just dark/bright) — don't penalize them.
         n_outliers = int(outlier_mask.sum())
-        log.info(
-            "Stage 13: Lighting-aware training — median %.0f lux, %d outlier frames "
-            "will be down-weighted to 0.3x",
-            median_lux, n_outliers,
-        )
+        total_frames = len(outlier_mask)
+        outlier_ratio = n_outliers / max(total_frames, 1)
+
+        if outlier_ratio > 0.8:
+            # Most frames flagged = consistent lighting, not real outliers
+            lighting_weights = np.ones(total_frames, dtype=np.float32)
+            log.info(
+                "Stage 13: Consistent lighting (%.0f lux, %d/%d flagged) — "
+                "no down-weighting applied (all frames are similar)",
+                median_lux, n_outliers, total_frames,
+            )
+        else:
+            lighting_weights = np.where(outlier_mask, 0.3, 1.0).astype(np.float32)
+            log.info(
+                "Stage 13: Lighting-aware training — median %.0f lux, %d outlier frames "
+                "will be down-weighted to 0.3x",
+                median_lux, n_outliers,
+            )
 
     # Load per-frame gyro stability weights (if available)
     # Stable frames get weight 1.0, unstable frames get reduced weight (0.5-1.0)
