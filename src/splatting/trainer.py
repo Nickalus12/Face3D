@@ -9,13 +9,13 @@ Optimizations (research-backed):
     - sh_degree_max=1: 15-25% faster for face scenes with controlled lighting
     - radius_clip/near_plane/far_plane: skip out-of-range Gaussians
     - cudnn.benchmark: faster conv operations (SSIM etc.)
-    - Reduced densification frequency (refine_every=500)
+    - Moderate densification frequency (refine_every=200, gsplat default=100)
     - LPIPS and appearance embedding disabled by default (expensive)
-    - 3-stage progressive resolution (1/4 -> 1/2 -> full)
+    - 3-stage progressive resolution (1/4 -> 1/2 -> full, 10%/30% boundaries)
     - Staged loss introduction (L1+depth -> +DSSIM -> +normal+distortion)
-    - Depth loss with decay
+    - Depth loss with decay (strong early guidance, fade for fine detail)
     - LR warmup for position learning rate
-    - 3000 iterations default (sufficient with good initialization)
+    - 7000 iterations default (EDGS: dense init converges by 5K, 7K for full quality)
     - SelectiveAdam: visibility-aware optimizer, updates only visible Gaussians (20-40% faster)
     - MCMCStrategy: fixed Gaussian count via MCMC sampling (consistent speed, no growth)
 """
@@ -191,8 +191,9 @@ class AppearanceMLP(nn.Module):
 class TrainingConfig:
     """Configuration for Gaussian Splatting training."""
 
-    # Iterations — 3K is sufficient with good initialization and progressive training
-    iterations: int = 3_000
+    # Iterations — 7K for quality with dense init (EDGS shows dense init converges by 5K,
+    # 7K matches 3DGS quality eval checkpoint for final refinement at full resolution)
+    iterations: int = 7_000
 
     # Strategy selection: "default" uses clone/split/prune, "mcmc" uses MCMC sampling,
     # "auto" selects based on scene type (currently maps to "default")
@@ -206,7 +207,7 @@ class TrainingConfig:
     lr_means: float = 1.6e-4
     lr_means_final: float = 1.6e-6
     lr_means_delay_mult: float = 0.01
-    lr_means_max_steps: int = 3_000  # Match iterations for compressed LR schedule
+    lr_means_max_steps: int = 7_000  # Match iterations for LR schedule
     lr_scales: float = 5e-3
     lr_quats: float = 1e-3
     lr_opacities: float = 5e-2
@@ -223,12 +224,12 @@ class TrainingConfig:
 
     # --- 2DGS-specific settings ---
     use_2dgs: bool = True
-    lambda_normal: float = 0.05       # Normal consistency weight
-    lambda_distort: float = 0.01      # Distortion regularization weight
+    lambda_normal: float = 0.05       # Normal consistency weight (matches gsplat 2DGS example: 5e-2)
+    lambda_distort: float = 0.01      # Distortion regularization weight (matches gsplat 2DGS example: 1e-2)
     lambda_lpips: float = 0.0         # LPIPS disabled by default — VGG forward pass is expensive
     lambda_depth: float = 0.1         # Depth supervision weight (2DGS median depth)
-    lambda_depth_initial: float = 0.1 # Depth weight at start (decays to lambda_depth_final)
-    lambda_depth_final: float = 0.01  # Depth weight at 60% of training
+    lambda_depth_initial: float = 0.2 # Increased from 0.1: stronger depth guidance early = better geometry
+    lambda_depth_final: float = 0.005 # Lower final: let photometric loss dominate for fine detail
     lambda_opacity_entropy: float = 0.001  # Opacity entropy regularization weight
 
     # Appearance embedding (per-frame exposure/white-balance correction)
@@ -240,26 +241,26 @@ class TrainingConfig:
     use_camera_opt: bool = False
 
     # Progressive training: 3-stage progressive resolution
-    #   Stage 1 (0-15%):  1/4 resolution
-    #   Stage 2 (15-40%): 1/2 resolution
-    #   Stage 3 (40%+):   full resolution
+    #   Stage 1 (0-10%):  1/4 resolution  (~700 iters at 7K)
+    #   Stage 2 (10-30%): 1/2 resolution  (~1400 iters at 7K)
+    #   Stage 3 (30%+):   full resolution (~4900 iters at 7K — most time at full res)
     progressive_training: bool = True
     progressive_stages: int = 3  # 2 = legacy half/full, 3 = quarter/half/full
 
     # Staged loss introduction (only active when progressive_stages=3):
-    #   Stage 1 (0-15%):  L1 + depth supervision only
-    #   Stage 2 (15-40%): + D-SSIM
-    #   Stage 3 (40%+):   + normal consistency + distortion (full loss)
+    #   Stage 1 (0-10%):  L1 + depth supervision only
+    #   Stage 2 (10-30%): + D-SSIM
+    #   Stage 3 (30%+):   + normal consistency + distortion (full loss)
     staged_loss: bool = True
 
-    # DefaultStrategy parameters — tuned for RTX 3080 16GB
-    prune_opa: float = 0.005
-    grow_grad2d: float = 0.0005  # Higher threshold = fewer new Gaussians
+    # DefaultStrategy parameters — tuned for RTX 3080 16GB, quality-focused
+    prune_opa: float = 0.005  # Conservative pruning preserves facial detail (gsplat default=0.05)
+    grow_grad2d: float = 0.0004  # Lower than 0.0005 for finer densification on facial features
     grow_scale3d: float = 0.01
     refine_start_iter: int = 500
-    refine_stop_iter: int = 0  # 0 = auto (60% of iterations); fewer densification events
+    refine_stop_iter: int = 0  # 0 = auto (60% of iterations)
     reset_every: int = 3_000
-    refine_every: int = 500  # Densify less frequently — fewer Gaussians mid-training
+    refine_every: int = 200  # More frequent refinement (gsplat default=100; 200 for dense init balance)
     absgrad: bool = True
     max_num_gaussians: int = 500_000  # Hard cap for 16GB VRAM (~8GB for 500K Gaussians)
 
@@ -272,9 +273,11 @@ class TrainingConfig:
     mcmc_refine_stop_iter: int = 0  # 0 = auto (80% of iterations)
     mcmc_min_opacity: float = 0.005  # Minimum opacity for teleportation
 
-    # SH degree scheduling — SH1 (4 coefficients) is sufficient for face scenes
-    # with controlled lighting. SH3 drops throughput from ~12 it/s to ~4.5 it/s.
-    sh_degree_max: int = 1
+    # SH degree scheduling — SH2 (9 coefficients) captures specular highlights and
+    # subtle view-dependent effects on skin. SH1 is too flat for realistic faces;
+    # SH3 (16 coeffs) has 80% more parameters with marginal quality gain on bounded scenes.
+    # SH2 is ~10% slower than SH1 but significantly better for face realism.
+    sh_degree_max: int = 2
     sh_increase_every: int = 1_000  # increase active SH degree every N iters
 
     # torch.compile: JIT-compile the training step for 30-50% speedup on Ampere+ GPUs.
@@ -300,7 +303,7 @@ class TrainingConfig:
     radius_clip: float = 2.0  # Skip tiny Gaussians for speed
 
     # Checkpointing
-    checkpoint_every: int = 5_000
+    checkpoint_every: int = 3_500  # Checkpoint at 50% and 100% for 7K iterations
     eval_every: int = 1_000
 
     # Rendering
@@ -666,11 +669,11 @@ class GaussianTrainer:
         bg = torch.tensor(cfg.background_color, dtype=torch.float32, device=self.device)
 
         # Progressive training: compute iteration boundaries for resolution stages
-        # 3-stage: 0-15% quarter, 15-40% half, 40%+ full
+        # 3-stage: 0-10% quarter, 10-30% half, 30%+ full (more time at full res for quality)
         # 2-stage (legacy): 0-50% half, 50%+ full
         if cfg.progressive_training and cfg.progressive_stages == 3:
-            _prog_stage1_end = int(cfg.iterations * 0.15)  # end of 1/4 res
-            _prog_stage2_end = int(cfg.iterations * 0.40)  # end of 1/2 res
+            _prog_stage1_end = int(cfg.iterations * 0.10)  # end of 1/4 res
+            _prog_stage2_end = int(cfg.iterations * 0.30)  # end of 1/2 res
         elif cfg.progressive_training:
             _prog_stage1_end = 0                            # no 1/4 res stage
             _prog_stage2_end = cfg.iterations // 2          # end of 1/2 res
@@ -1516,9 +1519,9 @@ class GaussianTrainer:
         """Compute combined 2DGS training loss with face-optimized terms.
 
         Staged loss introduction (when staged_loss=True):
-            - Stage 1 (0-15%): L1 + depth supervision only (fast geometry)
-            - Stage 2 (15-40%): + D-SSIM (structural similarity)
-            - Stage 3 (40%+): + normal consistency + distortion (full loss)
+            - Stage 1 (0-10%): L1 + depth supervision only (fast geometry)
+            - Stage 2 (10-30%): + D-SSIM (structural similarity)
+            - Stage 3 (30%+): + normal consistency + distortion (full loss)
 
         Depth loss decay: weight decays from lambda_depth_initial to
         lambda_depth_final by 60% of training.
@@ -1535,8 +1538,8 @@ class GaussianTrainer:
         cfg = self.config
 
         # Determine loss stage boundaries
-        stage1_end = int(cfg.iterations * 0.15)  # 0-15%: L1 + depth only
-        stage2_end = int(cfg.iterations * 0.40)  # 15-40%: + D-SSIM
+        stage1_end = int(cfg.iterations * 0.10)  # 0-10%: L1 + depth only
+        stage2_end = int(cfg.iterations * 0.30)  # 10-30%: + D-SSIM
         use_staged = cfg.staged_loss
 
         # Apply mask if provided

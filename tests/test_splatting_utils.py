@@ -41,7 +41,7 @@ class TestTrainingConfig:
     def test_default_iterations(self):
         from splatting.trainer import TrainingConfig
         cfg = TrainingConfig()
-        assert cfg.iterations == 3000
+        assert cfg.iterations == 7000
 
     def test_default_strategy(self):
         from splatting.trainer import TrainingConfig
@@ -127,17 +127,17 @@ class TestProgressiveResolution:
     """Test the 3-stage progressive resolution schedule logic."""
 
     def test_stage_boundaries_3stage(self):
-        """Stage transitions: 0-15% quarter, 15-40% half, 40%+ full."""
+        """Stage transitions: 0-10% quarter, 10-30% half, 30%+ full."""
         from splatting.trainer import TrainingConfig
-        cfg = TrainingConfig(iterations=3000, progressive_stages=3)
+        cfg = TrainingConfig(iterations=7000, progressive_stages=3)
 
-        # Stage 1 ends at 15% = iteration 450
-        # Stage 2 ends at 40% = iteration 1200
-        stage1_end = int(cfg.iterations * 0.15)
-        stage2_end = int(cfg.iterations * 0.40)
+        # Stage 1 ends at 10% = iteration 700
+        # Stage 2 ends at 30% = iteration 2100
+        stage1_end = int(cfg.iterations * 0.10)
+        stage2_end = int(cfg.iterations * 0.30)
 
-        assert stage1_end == 450
-        assert stage2_end == 1200
+        assert stage1_end == 700
+        assert stage2_end == 2100
 
     def test_resolution_scale_factors(self):
         """Quarter / half / full resolution scale factors."""

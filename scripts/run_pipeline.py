@@ -2235,8 +2235,11 @@ def stage_13_train_gaussians(config: dict, session: dict) -> bool:
                  len(gaussians.positions), max_num_gaussians)
 
         tc = TrainingConfig(
-            iterations=train_params.get("iterations", 3000),
+            iterations=train_params.get("iterations", 7000),
             max_num_gaussians=max_num_gaussians,
+            grow_grad2d=train_params.get("grow_grad2d", 0.0004),
+            refine_stop_iter=train_params.get("refine_stop_iter", 0),
+            refine_every=train_params.get("refine_every", 200),
         )
         trainer = GaussianTrainer(config=tc)
 

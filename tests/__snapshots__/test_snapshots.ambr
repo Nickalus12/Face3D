@@ -747,12 +747,12 @@
     'capture.max_frames': 80,
     'photos.multi_lens.main_200mp_weight': 5.0,
     'reconstruction.da3.conf_threshold': 0.0,
-    'reconstruction.da3.process_res': 0,
+    'reconstruction.da3.process_res': 504,
     'reconstruction.flame.num_expression_coeffs': 50,
     'reconstruction.flame.num_shape_coeffs': 100,
     'reconstruction.use_da3_unified': True,
-    'splatting.training.iterations': 3000,
-    'splatting.training.max_num_gaussians': 300000,
+    'splatting.training.iterations': 7000,
+    'splatting.training.max_num_gaussians': 500000,
   })
 # ---
 # name: TestSegmentationMaskSnapshots.test_synthetic_mask_stats

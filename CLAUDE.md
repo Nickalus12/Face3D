@@ -164,13 +164,16 @@ Samsung Sensor Logger ZIPs contain CSV files with pre-fused orientation quaterni
 ### FLAME Model
 Located at `Models/Flame/flame2023_Open.pkl`. Loaded via pickle with `encoding='latin1'` fallback. The `mediapipe_landmark_embedding.npz` maps MediaPipe landmarks to FLAME mesh vertices via barycentric coordinates.
 
-### Training Defaults (optimized for RTX 3080 16GB)
-- 3,000 iterations (not 30K — dense init + progressive resolution converges fast)
+### Training Defaults (optimized for RTX 3080 16GB, quality-focused)
+- 7,000 iterations (EDGS research: dense init converges by 5K, 7K for full quality refinement)
 - `packed=False` (30% faster than True; True saves up to 4x memory for large scenes)
-- `sh_degree_max=1` (sufficient for faces, 15-25% faster than SH3)
-- `max_num_gaussians=300,000` (VRAM safety cap)
-- 3-stage progressive resolution: 1/4 → 1/2 → full
-- Staged loss: L1+depth first, add DSSIM at 15%, add normal+distortion at 40%
+- `sh_degree_max=2` (captures specular/skin view-dependent effects; SH1 too flat, SH3 marginal gain)
+- `max_num_gaussians=500,000` (VRAM cap for 16GB)
+- `refine_every=200` (more frequent densification than 500; gsplat default is 100)
+- `grow_grad2d=0.0004` (finer densification for facial detail)
+- 3-stage progressive resolution: 1/4 → 1/2 → full (10%/30% boundaries)
+- Staged loss: L1+depth first, add DSSIM at 10%, add normal+distortion at 30%
+- Depth decay: strong early (0.2) → weak late (0.005) for geometry then fine detail
 
 ### Tauri IPC
 Frontend calls Rust via `invoke()` from `@tauri-apps/api/core`. The `src/lib/api.ts` provides a type-safe wrapper with retry logic, caching (TTL-based), and dev-mode mock data fallback (checks `window.__TAURI_INTERNALS__`).
@@ -183,8 +186,9 @@ CPU-bound stages use `ProcessPoolExecutor` via `src/utils/parallel.py`. MediaPip
 `config/pipeline.yaml` — all hyperparameters. Key sections:
 - `capture.max_frames`: 80 (default for 10-15s clips)
 - `reconstruction.use_da3_unified`: true (set false to use COLMAP instead)
-- `reconstruction.da3.process_res`: 0 (auto-select 336 for face close-ups, 504 for wide)
-- `splatting.training.iterations`: 3000
+- `reconstruction.da3.process_res`: 504 (DA3 training resolution; optimal for depth quality)
+- `reconstruction.da3.conf_percentile`: 25.0 (keep top 75% of points for denser clouds)
+- `splatting.training.iterations`: 7000 (quality-focused; dense init converges by 5K)
 - `splatting.export.formats`: ["ply", "splat"] (export formats: ply, splat, compressed, gltf)
 - `photos.multi_lens.main_200mp_weight`: 5.0 (200MP photos weighted 5x during training)
 

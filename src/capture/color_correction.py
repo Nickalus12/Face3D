@@ -387,10 +387,12 @@ def _gray_world_white_balance(img: np.ndarray) -> np.ndarray:
     """Apply Gray World assumption white balance correction.
 
     Adjusts each channel so the average color is neutral gray.
-    This corrects color casts from indoor lighting, tungsten, etc.
+    Works well for scenes with diverse colors (outdoor, well-lit indoor).
     """
     img_float = img.astype(np.float32)
-    avg_b, avg_g, avg_r = img_float[:, :, 0].mean(), img_float[:, :, 1].mean(), img_float[:, :, 2].mean()
+    avg_b = img_float[:, :, 0].mean()
+    avg_g = img_float[:, :, 1].mean()
+    avg_r = img_float[:, :, 2].mean()
     avg_all = (avg_b + avg_g + avg_r) / 3.0
 
     if avg_b > 0 and avg_g > 0 and avg_r > 0:
@@ -401,6 +403,130 @@ def _gray_world_white_balance(img: np.ndarray) -> np.ndarray:
     return np.clip(img_float, 0, 255).astype(np.uint8)
 
 
+def _white_patch_white_balance(
+    img: np.ndarray,
+    percentile: float = 95.0,
+) -> np.ndarray:
+    """Apply White Patch (Max-RGB) white balance correction.
+
+    Assumes the brightest pixels in each channel represent white.
+    Uses a percentile (default 95th) instead of the absolute max to
+    avoid being thrown off by specular highlights or sensor noise.
+
+    Works better than Gray World for scenes dominated by a single color
+    (e.g. skin in face close-ups).
+    """
+    img_float = img.astype(np.float32)
+    max_b = np.percentile(img_float[:, :, 0], percentile)
+    max_g = np.percentile(img_float[:, :, 1], percentile)
+    max_r = np.percentile(img_float[:, :, 2], percentile)
+    max_val = max(max_b, max_g, max_r, 1.0)
+
+    if max_b > 0:
+        img_float[:, :, 0] *= max_val / max_b
+    if max_g > 0:
+        img_float[:, :, 1] *= max_val / max_g
+    if max_r > 0:
+        img_float[:, :, 2] *= max_val / max_r
+
+    return np.clip(img_float, 0, 255).astype(np.uint8)
+
+
+def _pick_best_white_balance(img: np.ndarray) -> np.ndarray:
+    """Apply both Gray World and White Patch WB, return the more neutral result.
+
+    For 3D reconstruction, we want minimal color cast so that feature
+    descriptors and photometric loss see consistent colors. We score each
+    result by how close the mean A and B channels in LAB are to neutral
+    (128). The result closer to neutral wins.
+    """
+    gw = _gray_world_white_balance(img)
+    wp = _white_patch_white_balance(img)
+
+    def _neutrality_score(frame: np.ndarray) -> float:
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        # Distance of mean A,B from neutral (128)
+        mean_a = lab[:, :, 1].mean()
+        mean_b = lab[:, :, 2].mean()
+        return abs(mean_a - 128.0) + abs(mean_b - 128.0)
+
+    score_gw = _neutrality_score(gw)
+    score_wp = _neutrality_score(wp)
+
+    return gw if score_gw <= score_wp else wp
+
+
+def _adaptive_clahe_clip_limit(
+    l_channel: np.ndarray,
+    base_clip: float = 2.5,
+    min_clip: float = 1.0,
+    max_clip: float = 5.0,
+) -> float:
+    """Compute an adaptive CLAHE clip limit based on the image histogram.
+
+    Dark images (low mean L) get a higher clip limit because they need
+    more local contrast boost. Bright, well-exposed images get a lower
+    clip limit to avoid over-enhancement and haloing.
+
+    The clip limit scales linearly between min_clip and max_clip based
+    on how far the mean luminance is from the ideal midpoint (128).
+    """
+    mean_l = float(l_channel.mean())
+    std_l = float(l_channel.std())
+
+    # Darker images need more contrast boost
+    # Mean L in [0, 255]; ideal is ~128
+    darkness_factor = max(0.0, (128.0 - mean_l) / 128.0)  # 0..1, higher = darker
+
+    # Low-contrast images also benefit from more CLAHE
+    # std_l for a well-exposed image is typically 40-60
+    contrast_factor = max(0.0, (50.0 - std_l) / 50.0)  # 0..1, higher = flatter
+
+    # Combine: weight darkness more (0.7) vs contrast (0.3)
+    boost = 0.7 * darkness_factor + 0.3 * contrast_factor
+    clip = base_clip + boost * (max_clip - base_clip)
+    return float(np.clip(clip, min_clip, max_clip))
+
+
+def _gamma_correction(img: np.ndarray, gamma: float) -> np.ndarray:
+    """Apply gamma correction via a precomputed uint8 LUT.
+
+    gamma < 1.0 brightens (useful for dark footage): output = input^gamma,
+    so dark pixel 60/255 -> (0.235)^0.6 = 0.416 -> brighter.
+    gamma > 1.0 darkens.
+    """
+    table = np.array(
+        [(i / 255.0) ** gamma * 255.0 for i in range(256)],
+        dtype=np.uint8,
+    )
+    return cv2.LUT(img, table)
+
+
+def _unsharp_mask(
+    img: np.ndarray,
+    sigma: float = 1.0,
+    strength: float = 0.5,
+) -> np.ndarray:
+    """Apply mild unsharp mask to improve feature detection quality.
+
+    Uses a Gaussian blur subtraction approach. The strength is kept low
+    (0.3-0.7) to sharpen edges for SIFT/feature matching without
+    amplifying noise or creating ringing artifacts.
+
+    Args:
+        img: BGR uint8 image.
+        sigma: Gaussian blur sigma (controls radius of sharpening).
+        strength: Sharpening amount. 0 = no effect, 1 = strong.
+
+    Returns:
+        Sharpened BGR uint8 image.
+    """
+    blurred = cv2.GaussianBlur(img, (0, 0), sigma)
+    # sharpened = original * (1 + strength) - blurred * strength
+    sharpened = cv2.addWeighted(img, 1.0 + strength, blurred, -strength, 0)
+    return sharpened
+
+
 def auto_enhance_frames(
     frames_dir: str | Path,
     output_dir: str | Path,
@@ -408,29 +534,47 @@ def auto_enhance_frames(
     apply_white_balance: bool = True,
     apply_clahe: bool = True,
     apply_denoise: bool = True,
+    apply_gamma: bool = True,
+    apply_sharpen: bool = True,
     clahe_clip_limit: float = 2.5,
     clahe_grid_size: int = 8,
+    sharpen_sigma: float = 1.0,
+    sharpen_strength: float = 0.4,
 ) -> list[Path]:
-    """Comprehensive auto-enhancement for any footage.
+    """Comprehensive auto-enhancement for 3D reconstruction preprocessing.
 
-    Applies three correction passes (all optional):
-    1. White balance — Gray World correction removes color casts
-    2. CLAHE — Local contrast enhancement in LAB color space
-    3. Mild denoising — fastNlMeans for noise from underexposure
+    Applies up to six correction passes (all optional, adaptive):
 
-    Runs on every frame regardless of LOG profile detection.
-    Well-exposed frames get minimal correction; dark/bright frames
-    get proportionally more.
+    1. White balance -- picks the better of Gray World and White Patch
+       per-frame to minimize color cast regardless of scene content.
+    2. Gamma correction -- for consistently dark footage, applies a
+       proper gamma curve before CLAHE to lift shadows without clipping.
+    3. Adaptive CLAHE -- clip limit auto-adjusts based on per-frame
+       histogram: dark/flat images get more contrast boost, bright
+       images get less. Operates on L-channel in LAB to preserve color.
+    4. Brightness normalization -- global gain to hit target brightness.
+    5. Mild denoising -- fastNlMeans only when footage is dark (noise
+       is amplified by the above corrections).
+    6. Unsharp mask -- mild edge sharpening to improve SIFT/feature
+       detection quality for COLMAP and DA3.
+
+    All enhancements are tuned to improve feature detection (more
+    COLMAP keypoints, better DA3 matching) and 2DGS training quality
+    (consistent color/exposure reduces photometric loss noise).
 
     Args:
         frames_dir: Input frames directory.
         output_dir: Output directory for enhanced frames.
         target_brightness: Target mean L-channel brightness (0-255).
-        apply_white_balance: Apply Gray World white balance correction.
-        apply_clahe: Apply CLAHE local contrast enhancement.
-        apply_denoise: Apply mild denoising (useful for dark/noisy frames).
-        clahe_clip_limit: CLAHE contrast limit (2-5 range, higher = more contrast).
+        apply_white_balance: Pick best of Gray World / White Patch WB.
+        apply_clahe: Apply adaptive CLAHE local contrast enhancement.
+        apply_denoise: Apply mild denoising for dark/noisy frames.
+        apply_gamma: Apply gamma correction for dark footage.
+        apply_sharpen: Apply mild unsharp mask for feature detection.
+        clahe_clip_limit: Base CLAHE contrast limit (auto-adjusted per frame).
         clahe_grid_size: CLAHE tile grid size (8 is standard).
+        sharpen_sigma: Unsharp mask Gaussian sigma.
+        sharpen_strength: Unsharp mask strength (0-1, 0.3-0.5 recommended).
 
     Returns:
         List of enhanced frame paths.
@@ -445,35 +589,52 @@ def auto_enhance_frames(
     if not frame_files:
         return []
 
-    # Analyze overall exposure from sample frames
-    sample_brightnesses = []
-    for fp in frame_files[:10]:
+    # --- Analyze overall exposure and color from sample frames ---
+    sample_brightnesses: list[float] = []
+    sample_a_means: list[float] = []
+    sample_b_means: list[float] = []
+    sample_count = min(len(frame_files), 20)
+    for fp in frame_files[:sample_count]:
         img = cv2.imread(str(fp))
         if img is not None:
             lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-            sample_brightnesses.append(lab[:, :, 0].mean())
+            sample_brightnesses.append(float(lab[:, :, 0].mean()))
+            sample_a_means.append(float(lab[:, :, 1].mean()))
+            sample_b_means.append(float(lab[:, :, 2].mean()))
 
     if not sample_brightnesses:
         return []
 
-    mean_l = np.mean(sample_brightnesses)
+    mean_l = float(np.mean(sample_brightnesses))
+    std_l_across = float(np.std(sample_brightnesses))
     logger.info(
-        "Auto-enhance: %d frames, mean L-channel=%.0f (target=%.0f)",
-        len(frame_files), mean_l, target_brightness,
+        "Auto-enhance: %d frames, mean L=%.0f (std=%.1f), target=%.0f",
+        len(frame_files), mean_l, std_l_across, target_brightness,
     )
 
-    clahe = cv2.createCLAHE(
-        clipLimit=clahe_clip_limit,
-        tileGridSize=(clahe_grid_size, clahe_grid_size),
-    )
+    # --- Determine gamma correction need ---
+    # Only apply gamma for consistently dark footage (mean L < 80).
+    # Gamma < 1 brightens. Scale: L=40 -> gamma=0.55, L=80 -> gamma=1.0
+    gamma_value = 1.0
+    if apply_gamma and mean_l < 80.0:
+        gamma_value = max(0.45, mean_l / 80.0)
+        logger.info(
+            "Gamma correction enabled: gamma=%.2f (mean L=%.0f is dark)",
+            gamma_value, mean_l,
+        )
 
-    # Compute global gain needed
-    # LAB L-channel range is 0-255 in OpenCV (uint8), target_brightness is also 0-255
-    global_gain = min(target_brightness / max(mean_l, 1.0), 2.5)
+    # --- Global brightness gain ---
+    # Computed after gamma (gamma brightens first, gain handles the rest)
+    effective_mean = mean_l
+    if gamma_value < 1.0:
+        # Estimate post-gamma brightness: L_new ~ L^gamma * 255
+        effective_mean = ((mean_l / 255.0) ** gamma_value) * 255.0
+    global_gain = min(target_brightness / max(effective_mean, 1.0), 2.5)
     needs_brightness = global_gain > 1.05 or global_gain < 0.95
 
-    results = []
+    results: list[Path] = []
     from tqdm import tqdm
+
     for fp in tqdm(frame_files, desc="Enhancing"):
         dst = output_dir / fp.name
         if dst.exists():
@@ -484,16 +645,28 @@ def auto_enhance_frames(
         if img is None:
             continue
 
-        # Step 1: White balance (Gray World)
+        # Step 1: White balance (best of Gray World vs White Patch)
         if apply_white_balance:
-            img = _gray_world_white_balance(img)
+            img = _pick_best_white_balance(img)
 
-        # Step 2: CLAHE + brightness in LAB space
+        # Step 2: Gamma correction for dark footage
+        if apply_gamma and gamma_value < 1.0:
+            img = _gamma_correction(img, gamma_value)
+
+        # Step 3: Adaptive CLAHE + brightness in LAB space
         if apply_clahe or needs_brightness:
             lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
 
             if apply_clahe:
-                lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+                # Adaptive clip limit per frame
+                clip = _adaptive_clahe_clip_limit(
+                    lab[:, :, 0], base_clip=clahe_clip_limit,
+                )
+                clahe_obj = cv2.createCLAHE(
+                    clipLimit=clip,
+                    tileGridSize=(clahe_grid_size, clahe_grid_size),
+                )
+                lab[:, :, 0] = clahe_obj.apply(lab[:, :, 0])
 
             if needs_brightness:
                 l_float = lab[:, :, 0].astype(np.float32) * global_gain
@@ -501,22 +674,168 @@ def auto_enhance_frames(
 
             img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
-        # Step 3: Mild denoising (only if frame was dark — noise is worse)
+        # Step 4: Mild denoising (only for dark footage where noise is amplified)
         if apply_denoise and mean_l < 90:
-            img = cv2.fastNlMeansDenoisingColored(img, None, h=5, hColor=5, templateWindowSize=7, searchWindowSize=21)
+            img = cv2.fastNlMeansDenoisingColored(
+                img, None, h=5, hColor=5,
+                templateWindowSize=7, searchWindowSize=21,
+            )
+
+        # Step 5: Mild unsharp mask for feature detection
+        if apply_sharpen:
+            img = _unsharp_mask(img, sigma=sharpen_sigma, strength=sharpen_strength)
 
         cv2.imwrite(str(dst), img)
         results.append(dst)
 
-    # Report improvement
+    # --- Report improvement ---
     if results:
-        final_img = cv2.imread(str(results[0]))
-        if final_img is not None:
-            final_lab = cv2.cvtColor(final_img, cv2.COLOR_BGR2LAB)
-            final_l = final_lab[:, :, 0].mean()
+        sample_final: list[float] = []
+        for fp in results[:sample_count]:
+            final_img = cv2.imread(str(fp))
+            if final_img is not None:
+                final_lab = cv2.cvtColor(final_img, cv2.COLOR_BGR2LAB)
+                sample_final.append(float(final_lab[:, :, 0].mean()))
+        if sample_final:
+            final_mean = float(np.mean(sample_final))
+            final_std = float(np.std(sample_final))
             logger.info(
-                "Auto-enhance complete: %d frames, L-channel %.0f -> %.0f",
-                len(results), mean_l, final_l,
+                "Auto-enhance complete: %d frames, L-channel %.0f -> %.0f "
+                "(std %.1f -> %.1f)",
+                len(results), mean_l, final_mean, std_l_across, final_std,
             )
+
+    return results
+
+
+def normalize_color_across_frames(
+    frames_dir: str | Path,
+    output_dir: str | Path | None = None,
+    reference_method: str = "median",
+) -> list[Path]:
+    """Normalize color temperature and brightness across all frames.
+
+    For 3D Gaussian Splatting training, color consistency across views
+    is critical. Inconsistent white balance or exposure between frames
+    causes the photometric loss to fight against itself, producing
+    floaters and color artifacts.
+
+    This function computes a reference color profile (mean or median of
+    all frames' LAB channel statistics) and shifts each frame to match.
+    Only the chrominance (A, B channels) and brightness (L channel) are
+    adjusted -- spatial detail is untouched.
+
+    Args:
+        frames_dir: Directory containing frames to normalize.
+        output_dir: Output directory. If None, frames are modified in-place.
+        reference_method: How to compute the reference profile.
+            ``"median"`` (default) is robust to outlier frames.
+            ``"mean"`` uses the arithmetic mean.
+
+    Returns:
+        List of normalized frame paths.
+    """
+    frames_dir = Path(frames_dir)
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        output_dir = frames_dir  # In-place
+
+    frame_files = sorted(
+        list(frames_dir.glob("*.png")) + list(frames_dir.glob("*.jpg"))
+    )
+    if not frame_files:
+        return []
+
+    # --- Pass 1: Collect per-frame LAB statistics ---
+    logger.info("Color normalization pass 1: analyzing %d frames...", len(frame_files))
+    stats_l: list[float] = []
+    stats_a: list[float] = []
+    stats_b: list[float] = []
+
+    for fp in frame_files:
+        img = cv2.imread(str(fp))
+        if img is None:
+            stats_l.append(128.0)
+            stats_a.append(128.0)
+            stats_b.append(128.0)
+            continue
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        stats_l.append(float(lab[:, :, 0].mean()))
+        stats_a.append(float(lab[:, :, 1].mean()))
+        stats_b.append(float(lab[:, :, 2].mean()))
+
+    # Compute reference
+    agg_fn = np.median if reference_method == "median" else np.mean
+    ref_l = float(agg_fn(stats_l))
+    ref_a = float(agg_fn(stats_a))
+    ref_b = float(agg_fn(stats_b))
+
+    l_spread = float(np.std(stats_l))
+    a_spread = float(np.std(stats_a))
+    b_spread = float(np.std(stats_b))
+
+    logger.info(
+        "Color normalization reference: L=%.1f A=%.1f B=%.1f "
+        "(spread: L=%.1f A=%.1f B=%.1f)",
+        ref_l, ref_a, ref_b, l_spread, a_spread, b_spread,
+    )
+
+    # Skip if already consistent (all spreads < 3)
+    if l_spread < 3.0 and a_spread < 2.0 and b_spread < 2.0:
+        logger.info(
+            "Frames already color-consistent (spread L=%.1f, A=%.1f, B=%.1f). "
+            "Skipping normalization.",
+            l_spread, a_spread, b_spread,
+        )
+        return list(frame_files)
+
+    # --- Pass 2: Shift each frame toward the reference ---
+    logger.info("Color normalization pass 2: adjusting %d frames...", len(frame_files))
+    from tqdm import tqdm
+
+    results: list[Path] = []
+    for i, fp in enumerate(tqdm(frame_files, desc="Normalizing color")):
+        dst = output_dir / fp.name
+
+        img = cv2.imread(str(fp))
+        if img is None:
+            results.append(dst)
+            continue
+
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+        # Compute per-frame shift needed
+        shift_l = ref_l - stats_l[i]
+        shift_a = ref_a - stats_a[i]
+        shift_b = ref_b - stats_b[i]
+
+        # Apply gentle blending: 70% shift (avoid over-correction that
+        # destroys legitimate per-view lighting variation needed for
+        # multi-view stereo).
+        blend = 0.7
+        lab[:, :, 0] += shift_l * blend
+        lab[:, :, 1] += shift_a * blend
+        lab[:, :, 2] += shift_b * blend
+
+        lab = np.clip(lab, 0, 255).astype(np.uint8)
+        img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+        cv2.imwrite(str(dst), img)
+        results.append(dst)
+
+    # Report final consistency
+    final_l_vals: list[float] = []
+    for fp in results[:20]:
+        check = cv2.imread(str(fp))
+        if check is not None:
+            check_lab = cv2.cvtColor(check, cv2.COLOR_BGR2LAB)
+            final_l_vals.append(float(check_lab[:, :, 0].mean()))
+    if final_l_vals:
+        logger.info(
+            "Color normalization complete: %d frames, L spread %.1f -> %.1f",
+            len(results), l_spread, float(np.std(final_l_vals)),
+        )
 
     return results
