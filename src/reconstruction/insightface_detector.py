@@ -144,6 +144,12 @@ def detect_batch(
             if result["bbox"]:
                 result["bbox"] = (np.array(result["bbox"]) * inv_scale).tolist()
 
+        # Build MediaPipe-compatible landmarks_2d field for FLAME fitter compatibility
+        # The FLAME fitter reads "landmarks_2d" — provide the 68 3D points as 2D
+        compat_2d = None
+        if result.get("landmarks_3d_68"):
+            compat_2d = [[pt[0], pt[1]] for pt in result["landmarks_3d_68"]]
+
         # Save result
         output_data = {
             "detected": True,
@@ -151,6 +157,7 @@ def detect_batch(
             "image": str(img_path.name),
             "image_width": w,
             "image_height": h,
+            "landmarks_2d": compat_2d,  # Compat field for FLAME fitter
             **result,
         }
         out_file.write_text(json.dumps(output_data, indent=2))

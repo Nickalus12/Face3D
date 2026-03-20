@@ -18,6 +18,32 @@ from utils.timing import timed
 
 logger = logging.getLogger(__name__)
 
+# ── FLAME mesh vertex indices for standard 68-point iBUG landmarks ───────────
+# Used when InsightFace provides 68-point landmarks instead of MediaPipe's 478.
+# These map the 68 iBUG standard facial landmark positions to FLAME mesh vertices.
+_FLAME_68_VERTEX_INDICES = [
+    # Jaw contour (0-16)
+    2212, 3060, 3485, 3384, 3386, 3389, 3418, 3395, 3414,
+    3598, 3637, 3587, 3582, 3580, 3756, 2012, 730,
+    # Right eyebrow (17-21)
+    1731, 1728, 1730, 1735, 1812,
+    # Left eyebrow (22-26)
+    2177, 2184, 2180, 2178, 2174,
+    # Nose bridge (27-30)
+    1356, 1362, 1494, 1498,
+    # Nose bottom (31-35)
+    1542, 1552, 1609, 1569, 1582,
+    # Right eye (36-41)
+    3849, 3855, 3861, 3867, 3862, 3856,
+    # Left eye (42-47)
+    1405, 1411, 1417, 1423, 1418, 1412,
+    # Outer mouth (48-59)
+    1613, 1623, 1635, 1643, 1655, 1663,
+    2418, 2416, 2406, 2398, 2388, 2380,
+    # Inner mouth (60-67)
+    1692, 1698, 1704, 1709, 1719, 1713, 1707, 1697,
+]
+
 # ── Per-landmark weight groups (MediaPipe 468-style indices) ─────────────────
 # These assume the landmark_indices mapping selects a subset; weights are
 # applied by *position* in the mapped subset.  The helper below builds a
@@ -223,11 +249,31 @@ class FLAMEFitter:
         lmk_idx = self.landmark_indices
 
         # Prepare target landmarks: select the mapped subset
+        # Handle different landmark formats:
+        # - MediaPipe (478 pts): index with lmk_idx to get 105-pt subset
+        # - InsightFace (68 pts): use all 68 pts directly (iBUG standard)
         targets = []
+        use_full_landmarks = False
         for lm2d in landmarks_2d_per_frame:
-            subset = lm2d[lmk_idx]  # (K, 2)
-            targets.append(torch.tensor(subset, dtype=torch.float32, device=device))
+            if lm2d.shape[0] < max(lmk_idx) + 1:
+                # Fewer landmarks than MediaPipe indices expect — use all directly
+                use_full_landmarks = True
+                targets.append(torch.tensor(lm2d, dtype=torch.float32, device=device))
+            else:
+                subset = lm2d[lmk_idx]  # (K, 2)
+                targets.append(torch.tensor(subset, dtype=torch.float32, device=device))
         targets = torch.stack(targets)  # (F, K, 2)
+
+        # If using InsightFace 68-pt landmarks, update the weights and indices
+        if use_full_landmarks:
+            n_lm = targets.shape[1]
+            self._landmark_weights = torch.ones(n_lm, dtype=torch.float32, device=device)
+            # Weight key features higher: nose (27-35), eyes (36-47), mouth (48-67)
+            if n_lm == 68:
+                self._landmark_weights[27:36] *= 2.0  # nose
+                self._landmark_weights[36:48] *= 1.5  # eyes
+                self._landmark_weights[48:68] *= 1.5  # mouth
+            self._landmark_weights = self._landmark_weights / self._landmark_weights.sum() * n_lm
 
         # Per-frame confidence weights
         if frame_confidence_weights is not None:
@@ -337,9 +383,13 @@ class FLAMEFitter:
                             translation=translation,
                         )
                         vertices = result["vertices"]  # (1, V, 3)
-                        lmk_3d = self.flame.get_landmarks(
-                            vertices, self.lmk_faces_idx, self.lmk_bary_coords
-                        )  # (1, K, 3)
+                        if use_full_landmarks:
+                            # InsightFace 68-pt: select FLAME vertices at known 68-point indices
+                            lmk_3d = vertices[:, _FLAME_68_VERTEX_INDICES, :]  # (1, 68, 3)
+                        else:
+                            lmk_3d = self.flame.get_landmarks(
+                                vertices, self.lmk_faces_idx, self.lmk_bary_coords
+                            )  # (1, K, 3)
                 else:
                     result = self.flame(
                         shape_params=shape_params,
@@ -350,9 +400,12 @@ class FLAMEFitter:
                         translation=translation,
                     )
                     vertices = result["vertices"]
-                    lmk_3d = self.flame.get_landmarks(
-                        vertices, self.lmk_faces_idx, self.lmk_bary_coords
-                    )
+                    if use_full_landmarks:
+                        lmk_3d = vertices[:, _FLAME_68_VERTEX_INDICES, :]
+                    else:
+                        lmk_3d = self.flame.get_landmarks(
+                            vertices, self.lmk_faces_idx, self.lmk_bary_coords
+                        )
 
                 # Projection loss across all frames (float32 precision)
                 lmk_3d_f32 = lmk_3d.float()
@@ -1116,16 +1169,35 @@ def fit_flame_to_sequence(
         if not data.get("detected", False):
             continue
 
-        # Handle null/empty landmark data
+        # Handle landmark data from multiple detectors:
+        # - MediaPipe: "landmarks_2d" (478, 2)
+        # - InsightFace: "landmarks_3d_68" (68, 3) or "landmarks_2d_106" (106, 2)
         lm2d_raw = data.get("landmarks_2d")
+
+        # InsightFace format: prefer 3D 68-point (matches FLAME topology)
         if lm2d_raw is None or len(lm2d_raw) == 0:
-            logger.warning("Landmark file %s has no landmark data, skipping", lm_file.name)
+            lm3d_68 = data.get("landmarks_3d_68")
+            if lm3d_68 and len(lm3d_68) > 0:
+                # Use x,y from 3D landmarks as 2D projections
+                lm2d_raw = [[pt[0], pt[1]] for pt in lm3d_68]
+            else:
+                # Try 106-point 2D landmarks
+                lm2d_106 = data.get("landmarks_2d_106")
+                if lm2d_106 and len(lm2d_106) > 0:
+                    lm2d_raw = lm2d_106
+
+        if lm2d_raw is None or len(lm2d_raw) == 0:
+            logger.warning("Landmark file %s has no usable landmark data, skipping", lm_file.name)
             continue
 
         lm2d = np.array(lm2d_raw, dtype=np.float32)
         if lm2d.ndim != 2 or lm2d.shape[1] < 2:
             logger.warning("Landmark file %s has invalid shape %s, skipping", lm_file.name, lm2d.shape)
             continue
+
+        # Ensure we only use x,y (InsightFace 3D has z column)
+        if lm2d.shape[1] > 2:
+            lm2d = lm2d[:, :2]
 
         # Build camera dict from COLMAP data
         cam_id = colmap_info["camera_id"]
