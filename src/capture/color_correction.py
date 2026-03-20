@@ -381,3 +381,142 @@ def batch_color_correct(
 
     logger.info("Batch color correction complete: %d sRGB frames", len(srgb_paths))
     return srgb_paths
+
+
+def _gray_world_white_balance(img: np.ndarray) -> np.ndarray:
+    """Apply Gray World assumption white balance correction.
+
+    Adjusts each channel so the average color is neutral gray.
+    This corrects color casts from indoor lighting, tungsten, etc.
+    """
+    img_float = img.astype(np.float32)
+    avg_b, avg_g, avg_r = img_float[:, :, 0].mean(), img_float[:, :, 1].mean(), img_float[:, :, 2].mean()
+    avg_all = (avg_b + avg_g + avg_r) / 3.0
+
+    if avg_b > 0 and avg_g > 0 and avg_r > 0:
+        img_float[:, :, 0] *= avg_all / avg_b
+        img_float[:, :, 1] *= avg_all / avg_g
+        img_float[:, :, 2] *= avg_all / avg_r
+
+    return np.clip(img_float, 0, 255).astype(np.uint8)
+
+
+def auto_enhance_frames(
+    frames_dir: str | Path,
+    output_dir: str | Path,
+    target_brightness: float = 128.0,
+    apply_white_balance: bool = True,
+    apply_clahe: bool = True,
+    apply_denoise: bool = True,
+    clahe_clip_limit: float = 2.5,
+    clahe_grid_size: int = 8,
+) -> list[Path]:
+    """Comprehensive auto-enhancement for any footage.
+
+    Applies three correction passes (all optional):
+    1. White balance — Gray World correction removes color casts
+    2. CLAHE — Local contrast enhancement in LAB color space
+    3. Mild denoising — fastNlMeans for noise from underexposure
+
+    Runs on every frame regardless of LOG profile detection.
+    Well-exposed frames get minimal correction; dark/bright frames
+    get proportionally more.
+
+    Args:
+        frames_dir: Input frames directory.
+        output_dir: Output directory for enhanced frames.
+        target_brightness: Target mean L-channel brightness (0-255).
+        apply_white_balance: Apply Gray World white balance correction.
+        apply_clahe: Apply CLAHE local contrast enhancement.
+        apply_denoise: Apply mild denoising (useful for dark/noisy frames).
+        clahe_clip_limit: CLAHE contrast limit (2-5 range, higher = more contrast).
+        clahe_grid_size: CLAHE tile grid size (8 is standard).
+
+    Returns:
+        List of enhanced frame paths.
+    """
+    frames_dir = Path(frames_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    frame_files = sorted(
+        list(frames_dir.glob("*.png")) + list(frames_dir.glob("*.jpg"))
+    )
+    if not frame_files:
+        return []
+
+    # Analyze overall exposure from sample frames
+    sample_brightnesses = []
+    for fp in frame_files[:10]:
+        img = cv2.imread(str(fp))
+        if img is not None:
+            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+            sample_brightnesses.append(lab[:, :, 0].mean())
+
+    if not sample_brightnesses:
+        return []
+
+    mean_l = np.mean(sample_brightnesses)
+    logger.info(
+        "Auto-enhance: %d frames, mean L-channel=%.0f (target=%.0f)",
+        len(frame_files), mean_l, target_brightness,
+    )
+
+    clahe = cv2.createCLAHE(
+        clipLimit=clahe_clip_limit,
+        tileGridSize=(clahe_grid_size, clahe_grid_size),
+    )
+
+    # Compute global gain needed
+    # LAB L-channel range is 0-255 in OpenCV (uint8), target_brightness is also 0-255
+    global_gain = min(target_brightness / max(mean_l, 1.0), 2.5)
+    needs_brightness = global_gain > 1.05 or global_gain < 0.95
+
+    results = []
+    from tqdm import tqdm
+    for fp in tqdm(frame_files, desc="Enhancing"):
+        dst = output_dir / fp.name
+        if dst.exists():
+            results.append(dst)
+            continue
+
+        img = cv2.imread(str(fp))
+        if img is None:
+            continue
+
+        # Step 1: White balance (Gray World)
+        if apply_white_balance:
+            img = _gray_world_white_balance(img)
+
+        # Step 2: CLAHE + brightness in LAB space
+        if apply_clahe or needs_brightness:
+            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+
+            if apply_clahe:
+                lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+
+            if needs_brightness:
+                l_float = lab[:, :, 0].astype(np.float32) * global_gain
+                lab[:, :, 0] = np.clip(l_float, 0, 255).astype(np.uint8)
+
+            img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+        # Step 3: Mild denoising (only if frame was dark — noise is worse)
+        if apply_denoise and mean_l < 90:
+            img = cv2.fastNlMeansDenoisingColored(img, None, h=5, hColor=5, templateWindowSize=7, searchWindowSize=21)
+
+        cv2.imwrite(str(dst), img)
+        results.append(dst)
+
+    # Report improvement
+    if results:
+        final_img = cv2.imread(str(results[0]))
+        if final_img is not None:
+            final_lab = cv2.cvtColor(final_img, cv2.COLOR_BGR2LAB)
+            final_l = final_lab[:, :, 0].mean()
+            logger.info(
+                "Auto-enhance complete: %d frames, L-channel %.0f -> %.0f",
+                len(results), mean_l, final_l,
+            )
+
+    return results

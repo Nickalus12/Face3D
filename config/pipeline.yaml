@@ -54,7 +54,7 @@ depth:
 reconstruction:
   use_da3_unified: true  # When true, stage 6 uses DA3 to replace COLMAP+depth+alignment
   da3:
-    process_res: 0  # 0 = auto-select (336 for face close-ups, 504 for wide views)
+    process_res: 504  # Fixed at 504 for quality. Auto-select (0) picks 336 which is too low.
     use_ray_pose: true  # Ray-based pose estimation (more accurate per ICLR 2026 paper)
     chunk_size: 16  # Frames per DA3 inference call (auto-halves on OOM, cached per session)
     conf_threshold: 0.0  # 0.0 = adaptive percentile-based threshold (keeps top 70%)

@@ -1125,23 +1125,28 @@ def stage_2_color_correct(config: dict, session: dict) -> bool:
     # Determine whether the video is LOG-encoded
     is_log = session.get("detected_log_profile") is not None
 
-    if not cc_cfg.get("enabled", True):
-        log.info("Stage 2: Color correction disabled in config, copying frames as-is")
-        src = session["proc_dir"] / "frames"
-        dst = session["proc_dir"] / "frames_srgb"
-        for f in src.glob("*.png"):
-            shutil.copy2(f, dst / f.name)
-    else:
-        if is_log:
-            log.info("Stage 2: Applying LOG -> sRGB color correction...")
-        else:
-            log.info("Stage 2: No LOG profile — frames will be copied without correction")
+    frames_dir = session["proc_dir"] / "frames"
+    srgb_dir = session["proc_dir"] / "frames_srgb"
 
+    if is_log and cc_cfg.get("enabled", True):
+        log.info("Stage 2: Applying LOG -> sRGB color correction...")
         from capture.color_correction import batch_color_correct
         batch_color_correct(
-            frames_dir=session["proc_dir"] / "frames",
-            output_srgb_dir=session["proc_dir"] / "frames_srgb",
-            is_log=is_log,
+            frames_dir=frames_dir,
+            output_srgb_dir=srgb_dir,
+            is_log=True,
+        )
+    else:
+        # Not LOG — apply auto-enhancement (white balance, CLAHE, brightness)
+        log.info("Stage 2: No LOG profile — applying auto-enhancement (white balance + CLAHE + exposure)...")
+        from capture.color_correction import auto_enhance_frames
+        auto_enhance_frames(
+            frames_dir=frames_dir,
+            output_dir=srgb_dir,
+            target_brightness=128.0,
+            apply_white_balance=True,
+            apply_clahe=True,
+            apply_denoise=True,
         )
 
     mark_stage_complete(marker)
